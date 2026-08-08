@@ -9,9 +9,14 @@
     "lint": "eslint"
   },
   "dependencies": {
+    "@altananetwork/sdk": "^0.7.0",
     "next": "16.3.0",
+    "pino": "^10.3.1",
+    "postgres": "^3.4.9",
     "react": "19.2.8",
-    "react-dom": "19.2.8"
+    "react-dom": "19.2.8",
+    "viem": "^2.55.11",
+    "zod": "^4.4.3"
   },
   "devDependencies": {
     "@tailwindcss/postcss": "^4",
@@ -21,7 +26,9 @@
     "eslint": "^9",
     "eslint-config-next": "16.3.0",
     "tailwindcss": "^4",
+    "tsx": "^4.23.10",
     "typescript": "^5"
   },
-  "packageManager": "pnpm@11.1.1"
+  "packageManager": "pnpm@11.1.1",
+  "type": "module"
 }
