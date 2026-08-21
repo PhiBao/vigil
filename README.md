@@ -249,19 +249,54 @@ pnpm tsx scripts/roundtrip-testnet.mts
 
 ---
 
+## Sub-tracks (our product fit)
+
+Three partner tracks run alongside the main challenge and are judged independently. Below is how each sponsor's **technology is used inside our product** and what that means — not a restatement of their rules.
+
+### TermiX — measurable agent value
+
+**What we use.** TermiX's open-source **BSC MCP server** is itself an MCP endpoint of the kind our marketplace indexes and live-verifies — it belongs on the same shelves as every other agent. More fundamentally, our marketplace and TermiX share the same core belief: **hiring an agent is only worth it if it measurably beats doing the job yourself.** That belief is baked into our product, not bolted on:
+
+- Every agent card shows verification freshness, uptime, and the exact tool signatures it exposes — the raw material for judging "will this agent actually do the job."
+- `scripts/agent-advantage.mts` produces a structured report comparing real tasks run **through our marketplace** (one MCP call, ~1s, structured output) against doing them manually (dApp + explorer, minutes), recording time, cost and output. It is a product output, not a submission document.
+
+**What it means.** The thing TermiX measures — agent advantage — is what our marketplace surfaces on every page. A user deciding between agents is making the same comparison the report makes, in-product, before they spend anything.
+
+### AltLayer / 8004scan — the identity and trust index
+
+**What we use.** Our entire registry pipeline is built on the **8004scan developer API**: the `protocol=MCP` ingest feed, per-agent detail records (ownership, wallet, services, health checks), and reputation/feedback data. It is the supply-side index that our marketplace turns into a demand-side product. The **Pro API tier** (free for participants, 500 req/min vs ~8/min anonymous) is what makes continuous live verification of the whole registry feasible within the build window.
+
+**What it means.** 8004scan solved *discoverability by identity* — who an agent is, what it claims, how it has behaved on-chain. Our product consumes that and adds the missing half: *discoverability by capability* — what the agent's tools actually do, confirmed by probing the live endpoint. We also use 8004scan's data honestly: registry scores and health checks appear on the agent evidence page, and the sybil-farmed feedback we detected (all BSC feedbacks from a single address) is surfaced rather than hidden.
+
+### PancakeSwap — the position substrate
+
+**What we use.** PancakeSwap's **on-chain contracts are the literal allowlists and verification targets** in our product:
+
+- The `rebalancing` and `grid` session allowlists are PancakeSwap contracts — `pancakeV3NPM`, `pancakeV3SwapRouter` — so a hired agent's calldata can only touch PancakeSwap positions, nothing else.
+- The **V3 math** (`slot0`, ticks, in-range computation) is the substrate our position scanner reads to diagnose LP positions.
+- The agents we index and hire through the marketplace — V3 Pools (LP range management), Token Swaps (bounded swaps) — operate on those same contracts, and our calldata validation (target allowlist, selector check, approval targets, live `eth_call` simulation) enforces that a proposal can never put user funds at risk.
+
+**What it means.** PancakeSwap is the deepest liquidity on BSC, and it is where "smart money" agents are most dangerous to hand authority. Our marketplace makes PancakeSwap automation safe-by-construction: the safety envelope around a hired agent *is* PancakeSwap's own contract set, enforced on-chain by the user's session.
+
+---
+
 ## Status & roadmap
 
-- [x] Registry pipeline: ingest → classify → verify → persist
-- [x] Marketplace surface: browse, agent detail, scan on-ramp, hire consent
-- [x] Altana session rail: grant / execute / enforce / revoke (proven onchain)
+Nothing in the build or the sub-tracks requires waiting — the work is executable now, in parallel. The one background process (verification accrual) runs continuously and is not a blocker.
+
+- [x] Registry pipeline: ingest → classify → verify → persist (107 indexed, 17 verified live — HeyAnon family fully covered)
+- [x] Marketplace surface: browse (equal depth ×4), agent detail (auditable reasons), scan on-ramp, hire consent
+- [x] Altana session rail: grant / execute / enforce / revoke (proven onchain on testnet: `0xa2212cb9…` + `UnauthorizedCall` rejection)
 - [x] Calldata validation + simulation for third-party proposals
 - [x] Storage (Postgres + file fallback), rate limiting, encrypted keys, RPC failover
-- [ ] Verification accrual across the full index (background worker)
-- [ ] In-product live hire action (calldata → session execution UI)
-- [ ] TermiX Agent Advantage Report (third-party agent tasks, testnet + small mainnet)
-- [ ] Judging-window hardening + judge demo path
+- [x] In-product live hire action: tool picker → MCP call → validate → session execution → receipt (read tools: no funds needed; write tools: validated + simulated)
+- [x] TermiX Agent Advantage Report: 3 tasks via verified agents (Venus, V3 Pools, Beefy) — `data/agent-advantage.md`
+- [x] Altana track: testnet session proven; mainnet is optional for the "stronger" score
+- [x] PancakeSwap demo: V3 Pools (LP range) + Token Swaps (bounded swap) via the hire rail, allowlisted to PancakeSwap contracts
+- [ ] 8004scan Pro key application → speed up verification (free for participants; anonymous tier is 8/min)
+- [ ] Judging-window hardening + judge demo path (polish empty/loading/error states for thin categories)
 
-**Judging window:** Sep 9 – 23. Winner announced Nov 5. The marketplace must stay live and cheap through then.
+**Judging window:** Sep 9 – 23. Winner announced Nov 5. The marketplace must stay live and cheap through then. File store is ephemeral on serverless — set `DATABASE_URL` for persistent mandates in production.
 
 ---
 

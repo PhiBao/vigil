@@ -2,6 +2,7 @@ import { NextRequest } from "next/server";
 import { randomUUID } from "node:crypto";
 import { store } from "../../../db";
 import { encryptSecret } from "../../../lib/secrets";
+import { rateLimit } from "../../../lib/rate-limit";
 import type { Category } from "../../../registry/model";
 
 export const dynamic = "force-dynamic";
@@ -22,6 +23,9 @@ export interface CreateMandateBody {
 
 /** POST /api/mandates — persist a granted mandate (session stored encrypted). */
 export async function POST(request: NextRequest) {
+  const ip = request.headers.get("x-forwarded-for")?.split(",")[0]?.trim() ?? "unknown";
+  const rl = rateLimit(`mandate:${ip}`, { limit: 20, windowMs: 60_000 });
+  if (!rl.ok) return Response.json({ error: "rate limited" }, { status: 429 });
   let body: CreateMandateBody;
   try {
     body = (await request.json()) as CreateMandateBody;
@@ -43,8 +47,9 @@ export async function POST(request: NextRequest) {
   if (expirySeconds < Math.floor(Date.now() / 1000) + 60) return Response.json({ error: "expiry too soon" }, { status: 400 });
 
   try {
+    const id = randomUUID();
     await store().createMandate({
-      id: randomUUID(),
+      id,
       walletAddress,
       agentId,
       category,
@@ -56,7 +61,7 @@ export async function POST(request: NextRequest) {
       status: "active",
       createdAt: new Date(),
     });
-    return Response.json({ ok: true });
+    return Response.json({ ok: true, id });
   } catch (e: any) {
     console.error("mandate create error", e);
     return Response.json({ error: "store unavailable", detail: String(e?.message ?? e) }, { status: 500 });
@@ -65,6 +70,9 @@ export async function POST(request: NextRequest) {
 
 /** GET /api/mandates?wallet=0x… — list active mandates for a wallet. */
 export async function GET(request: NextRequest) {
+  const ip = request.headers.get("x-forwarded-for")?.split(",")[0]?.trim() ?? "unknown";
+  const rl = rateLimit(`mandates:${ip}`, { limit: 30, windowMs: 60_000 });
+  if (!rl.ok) return Response.json({ error: "rate limited" }, { status: 429 });
   const wallet = request.nextUrl.searchParams.get("wallet")?.trim()?.toLowerCase();
   if (!wallet || !/^0x[a-f0-9]{40}$/.test(wallet)) {
     return Response.json({ error: "invalid wallet" }, { status: 400 });
