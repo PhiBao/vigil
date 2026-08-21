@@ -2,12 +2,15 @@ import { randomUUID } from "node:crypto";
 import type { Address, Hex } from "viem";
 import { callTool } from "../registry/mcp";
 import type { AgentRecord } from "../registry/model";
+import type { Category } from "../registry/model";
 import { validateCalldata, simulateCall } from "./validate-calldata";
 import { store } from "../db";
 import { decryptSecret } from "../lib/secrets";
 import { Executor, sessionFromPersisted } from "../runtime/executor";
 import type { MandateRecord } from "../db/store";
 import { logger } from "../lib/logger";
+import { toBaseUnits } from "../lib/money";
+import { selectorsForCategory } from "../mandate/permissions";
 
 /**
  * Hire execution. The user hires a THIRD-PARTY agent; we route the request to
@@ -47,7 +50,15 @@ export async function hireAgent(
   try {
     const parsed = JSON.parse(text);
     if (!parsed.to || !parsed.data) throw new Error("missing to/data");
-    call = { to: parsed.to as Address, data: parsed.data as Hex, value: parsed.value };
+    let value: bigint | undefined;
+    if (parsed.value !== undefined && parsed.value !== null && parsed.value !== "") {
+      try {
+        value = BigInt(parsed.value);
+      } catch {
+        return { ok: false, calldataRejected: "invalid value field" };
+      }
+    }
+    call = { to: parsed.to as Address, data: parsed.data as Hex, value };
   } catch {
     // Fallback: if the text is a plain hex data blob, the target must be
     // supplied by the caller (e.g., the protocol contract for this tool).
@@ -60,22 +71,26 @@ export async function hireAgent(
     }
   }
 
-  // 3. Validate against the mandate's permissions.
+  // 3. Validate against the persisted mandate's permissions — the single source
+  //    of authority for this session (not the live category table, which drifts).
   const permissions = (mandate.permissions ?? {}) as { calls?: { to?: string }[] };
   const allowlist = (permissions.calls ?? []).map((c) => c.to).filter(Boolean) as Address[];
-  const capUsdWei = BigInt(Math.round(Number(mandate.capUsd) * 1e18));
+  const capWei = toBaseUnits(Number(mandate.capUsd));
+  const permittedSelectors = selectorsForCategory((mandate.category ?? "yield") as Category);
   const valid = validateCalldata(call, {
     allowlist,
-    permittedSelectors: undefined, // allowlist + onchain enforcement are the backstop
-    maxAmountWei: capUsdWei,
+    permittedSelectors,
+    allowedApproveSpenders: allowlist,
+    maxAmountWei: capWei,
+    maxValueWei: capWei,
   });
   if (!valid.ok) {
     logger.warn({ agent: agent.name, reason: valid.reason }, "calldata rejected");
     return { ok: false, calldataRejected: valid.reason };
   }
 
-  // 4. Simulate before sending.
-  const simulated = await simulateCall(call);
+  // 4. Simulate as the wallet before sending.
+  const simulated = await simulateCall(call, mandate.walletAddress as Address);
   if (!simulated) return { ok: false, calldataRejected: "simulation reverted" };
 
   // 5. Submit under the user's session.

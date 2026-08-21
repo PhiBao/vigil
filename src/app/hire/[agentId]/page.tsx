@@ -1,6 +1,6 @@
 import Link from "next/link";
 import { getAgent } from "@/registry/queries";
-import { buildPermissions, renderMandate } from "@/mandate/permissions";
+import { renderMandate } from "@/mandate/permissions";
 import type { Category } from "@/registry/model";
 import { HireConsent } from "@/components/hire-consent";
 
@@ -41,7 +41,6 @@ export default async function HirePage({
 
   const capUsd = 100;
   const expirySeconds = Math.floor(Date.now() / 1000) + 30 * 24 * 3600;
-  const permissions = buildPermissions(primary, { capUsd, expirySeconds, walletAddress: "0x0000000000000000000000000000000000000000" });
   const mandate = renderMandate(primary, capUsd);
 
   return (

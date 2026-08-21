@@ -4,6 +4,8 @@ import { store } from "../../../db";
 import { encryptSecret } from "../../../lib/secrets";
 import { rateLimit } from "../../../lib/rate-limit";
 import type { Category } from "../../../registry/model";
+import { toBaseUnits } from "../../../lib/money";
+import { buildPermissions } from "../../../mandate/permissions";
 
 export const dynamic = "force-dynamic";
 
@@ -44,7 +46,50 @@ export async function POST(request: NextRequest) {
   const agent = await store().getAgent(agentId).catch(() => null);
   if (!agent) return Response.json({ error: "unknown agent" }, { status: 400 });
   if (!Number.isFinite(capUsd) || capUsd <= 0) return Response.json({ error: "invalid cap" }, { status: 400 });
+  try {
+    toBaseUnits(capUsd);
+  } catch (e: any) {
+    return Response.json({ error: "invalid cap", detail: String(e?.message ?? e) }, { status: 400 });
+  }
   if (expirySeconds < Math.floor(Date.now() / 1000) + 60) return Response.json({ error: "expiry too soon" }, { status: 400 });
+
+  // Verify client-supplied permissions match the canonical buildPermissions for this
+  // category/cap/expiry. We allow the client to be more restrictive but not broader.
+  if (body.permissions) {
+    try {
+      const canonical = buildPermissions(category, {
+        capUsd,
+        expirySeconds,
+        walletAddress: walletAddress as `0x${string}`,
+      });
+      const canonCalls = new Set((canonical.calls ?? []).map((c: any) => (c.to as string).toLowerCase()));
+      const clientCalls = (body.permissions.calls ?? []).map((c) => c.to.toLowerCase());
+      for (const c of clientCalls) {
+        if (!canonCalls.has(c)) {
+          return Response.json({ error: `permission call ${c} not in canonical allowlist for ${category}` }, { status: 400 });
+        }
+      }
+      // Spend limits must not exceed canonical (fail if client inflates caps).
+      const canonSpend = new Map<string, bigint>();
+      for (const s of (canonical.spend ?? []) as any[]) {
+        const key = s.token ? (s.token as string).toLowerCase() : "__native__";
+        canonSpend.set(key, s.limit as bigint);
+      }
+      for (const s of body.permissions.spend ?? []) {
+        const key = s.token ? s.token.toLowerCase() : "__native__";
+        const canonLimit = canonSpend.get(key);
+        if (canonLimit === undefined) {
+          return Response.json({ error: `spend token ${s.token ?? "native"} not in canonical permissions` }, { status: 400 });
+        }
+        if (BigInt(s.limit) > canonLimit) {
+          return Response.json({ error: `spend limit for ${s.token ?? "native"} exceeds canonical cap` }, { status: 400 });
+        }
+      }
+    } catch (e: any) {
+      // buildPermissions can throw on invariant violation or toBaseUnits failure.
+      return Response.json({ error: "invalid permissions", detail: String(e?.message ?? e) }, { status: 400 });
+    }
+  }
 
   try {
     const id = randomUUID();

@@ -2,13 +2,14 @@ import { NextRequest } from "next/server";
 import { getAgent } from "@/registry/queries";
 import { callTool } from "@/registry/mcp";
 import { validateCalldata, simulateCall } from "@/hire/validate-calldata";
-import { allowlistForCategory } from "@/mandate/permissions";
+import { selectorsForCategory } from "@/mandate/permissions";
 import type { Category } from "@/registry/model";
 import { store } from "@/db";
 import { decryptSecret } from "@/lib/secrets";
 import { Executor, sessionFromPersisted } from "@/runtime/executor";
 import type { SessionPermissions } from "@altananetwork/sdk";
 import { rateLimit } from "@/lib/rate-limit";
+import { toBaseUnits } from "@/lib/money";
 
 export const dynamic = "force-dynamic";
 
@@ -72,18 +73,35 @@ export async function POST(request: NextRequest) {
     return Response.json({ ok: true, stage: "read", text: text.slice(0, 8000) });
   }
 
-  // 2) Validate calldata.
+  // 2) Validate calldata against the persisted mandate (single source of authority).
   const parsed = JSON.parse(text);
-  const call = { to: parsed.to as `0x${string}`, data: parsed.data as `0x${string}`, value: parsed.value ? BigInt(parsed.value) : undefined };
-  const allow = allowlistForCategory((mandate.category ?? "yield") as Category);
-  const maxWei = BigInt(Math.round(Number(mandate.capUsd) * 1e18));
-  const valid = validateCalldata(call, { allowlist: allow, maxAmountWei: maxWei });
+  let callValue: bigint | undefined;
+  if (parsed.value !== undefined && parsed.value !== null && parsed.value !== "") {
+    try {
+      callValue = BigInt(parsed.value);
+    } catch {
+      return Response.json({ ok: false, stage: "validation", error: "invalid value field", text: text.slice(0, 2000) }, { status: 400 });
+    }
+  }
+  const call = { to: parsed.to as `0x${string}`, data: parsed.data as `0x${string}`, value: callValue };
+  // Allowlist comes from the persisted mandate, not the live category table.
+  const persistedCalls = ((mandate.permissions ?? {}) as { calls?: { to?: string }[] }).calls ?? [];
+  const allow = persistedCalls.map((c) => c.to).filter(Boolean) as `0x${string}`[];
+  const capWei = toBaseUnits(Number(mandate.capUsd));
+  const permittedSelectors = selectorsForCategory((mandate.category ?? "yield") as Category);
+  const valid = validateCalldata(call, {
+    allowlist: allow,
+    permittedSelectors,
+    allowedApproveSpenders: allow as any,
+    maxAmountWei: capWei,
+    maxValueWei: capWei,
+  });
   if (!valid.ok) {
     return Response.json({ ok: false, stage: "validation", error: valid.reason, text: text.slice(0, 2000) }, { status: 400 });
   }
 
-  // 3) Simulate.
-  const simOk = await simulateCall(call);
+  // 3) Simulate as the wallet.
+  const simOk = await simulateCall(call, mandate.walletAddress as `0x${string}`);
   if (!simOk) {
     return Response.json({ ok: false, stage: "simulation", error: "simulation reverted", text: text.slice(0, 2000) }, { status: 400 });
   }

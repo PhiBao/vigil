@@ -12,11 +12,21 @@
 export const BSC_TOKEN_DECIMALS = 18n;
 
 export function toBaseUnits(amount: number, decimals: bigint = BSC_TOKEN_DECIMALS): bigint {
-  // Round-trip through string to avoid float drift; amounts are human inputs.
-  const s = amount.toFixed(Number(decimals));
-  const [int, frac = ""] = s.split(".");
-  const padded = (frac + "0".repeat(Number(decimals))).slice(0, Number(decimals));
-  return BigInt(int.replace(/[^0-9]/g, "") || "0") * 10n ** decimals + BigInt(padded || "0");
+  if (!Number.isFinite(amount)) throw new Error(`invalid amount: ${String(amount)}`);
+  if (amount < 0) throw new Error(`negative amount: ${amount}`);
+  if (amount >= 1e21) throw new Error(`amount too large for fixed-point conversion: ${amount}`);
+  // Use decimal string parsing to avoid binary float drift (e.g. 8.7*1e18 off by 1e3).
+  // toFixed on 0.1 yields "0.100000000000000006" (binary artefact), so prefer toString.
+  let s = amount.toString();
+  if (s.includes("e") || s.includes("E")) {
+    // Handles 1e-7 etc. Fall back to fixed-point then re-check.
+    s = amount.toFixed(Number(decimals));
+    if (s.includes("e") || s.includes("E")) throw new Error(`amount produced exponential notation: ${amount} -> ${s}`);
+  }
+  const [intPart, fracPart = ""] = s.split(".");
+  const padded = (fracPart + "0".repeat(Number(decimals))).slice(0, Number(decimals));
+  const intDigits = intPart.replace(/[^0-9]/g, "") || "0";
+  return BigInt(intDigits) * 10n ** decimals + BigInt(padded || "0");
 }
 
 export function fromBaseUnits(

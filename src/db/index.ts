@@ -19,7 +19,7 @@ function buildPgStore(sql: postgres.Sql): Store {
     async createMandate(m: MandateRecord) {
       await sql`
         insert into mandates (id, wallet_address, agent_id, category, cap_usd, expiry_seconds, session_public_key, session_signer_encrypted, permissions, status, created_at)
-        values (${m.id}, ${m.walletAddress.toLowerCase()}, ${m.agentId}, ${m.category ?? null}, ${m.capUsd}, ${m.expirySeconds}, ${m.sessionPublicKey}, ${m.sessionSignerEncrypted}, ${m.permissions ? JSON.stringify(m.permissions) : null}, ${m.status}, ${m.createdAt})
+        values (${m.id}, ${m.walletAddress.toLowerCase()}, ${m.agentId}, ${m.category ?? null}, ${m.capUsd}, ${m.expirySeconds}, ${m.sessionPublicKey}, ${m.sessionSignerEncrypted}, ${m.permissions ? sql.json(m.permissions as any) : null}, ${m.status}, ${m.createdAt})
       `;
     },
     async getMandate(id) {
@@ -81,7 +81,7 @@ function buildPgStore(sql: postgres.Sql): Store {
     async addReceipt(r: ReceiptRecord) {
       await sql`
         insert into receipts (id, mandate_id, agent_id, event, detail, tx_hash, before_state, after_state, created_at)
-        values (${r.id}, ${r.mandateId}, ${r.agentId}, ${r.event}, ${JSON.stringify(r.detail)}, ${r.txHash ?? null}, ${r.beforeState ? JSON.stringify(r.beforeState) : null}, ${r.afterState ? JSON.stringify(r.afterState) : null}, ${r.createdAt})
+        values (${r.id}, ${r.mandateId}, ${r.agentId}, ${r.event}, ${sql.json(r.detail as any)}, ${r.txHash ?? null}, ${r.beforeState ? sql.json(r.beforeState as any) : null}, ${r.afterState ? sql.json(r.afterState as any) : null}, ${r.createdAt})
       `;
     },
     async listReceipts(walletAddress, limit = 50) {
@@ -104,7 +104,7 @@ function buildPgStore(sql: postgres.Sql): Store {
     async addRun(r: RunRecord) {
       await sql`
         insert into proving_runs (id, agent_id, task, status, started_at, completed_at, result, tx_hashes)
-        values (${r.id}, ${r.agentId}, ${r.task}, ${r.status}, ${r.startedAt}, ${r.completedAt ?? null}, ${r.result ? JSON.stringify(r.result) : null}, ${r.txHashes})
+        values (${r.id}, ${r.agentId}, ${r.task}, ${r.status}, ${r.startedAt}, ${r.completedAt ?? null}, ${r.result ? sql.json(r.result as any) : null}, ${r.txHashes})
       `;
     },
     async updateRun(id, patch) {
@@ -134,7 +134,7 @@ function buildPgStore(sql: postgres.Sql): Store {
     },
     async upsertAgent(agent: any) {
       await sql`
-        insert into agents (agent_id, data, updated_at) values (${agent.agentId}, ${JSON.stringify(agent)}, now())
+        insert into agents (agent_id, data, updated_at) values (${agent.agentId}, ${sql.json(agent)}, now())
         on conflict (agent_id) do update set data = excluded.data, updated_at = now()
       `;
     },

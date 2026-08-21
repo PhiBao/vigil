@@ -1,9 +1,9 @@
 "use client";
 
-import { useState, useEffect } from "react";
+import { useState } from "react";
 import { useRouter } from "next/navigation";
 import { AltanaClient } from "@/lib/altana-client";
-import { allowlistForCategory } from "@/mandate/permissions";
+import { buildPermissions } from "@/mandate/permissions";
 import type { Category } from "@/registry/model";
 
 type Phase = "form" | "prompting" | "granting" | "done" | "error";
@@ -44,16 +44,28 @@ export function HireConsent({
     setPhase("prompting");
     setError(null);
     try {
-      const allow = allowlistForCategory(category);
+      if (!Number.isFinite(capUsd) || capUsd <= 0) throw new Error("invalid cap");
+      // Single source of truth: buildPermissions derives both calls and spend (incl. WBNB + native).
+      const perms = buildPermissions(category, {
+        capUsd,
+        expirySeconds,
+        walletAddress: "0x0000000000000000000000000000000000000000",
+      });
       const sdkPermissions = {
-        calls: allow.map((to) => ({ to } as { to: `0x${string}` })),
-        spend: [
-          { token: "0x55d398326f99059fF775485246999027B3197955" as `0x${string}`, limit: BigInt(Math.round(capUsd * 1e18)), period: "day" as const },
-        ],
+        calls: (perms.calls ?? []).map((c: any) => ({ to: c.to as `0x${string}`, ...(c.signature ? { signature: c.signature } : {}) })),
+        spend: (perms.spend ?? []).map((s: any) => ({
+          ...(s.token ? { token: s.token as `0x${string}` } : {}),
+          limit: s.limit as bigint,
+          period: s.period as "day",
+        })),
       };
       const serializablePermissions = {
-        calls: allow.map((to) => ({ to })),
-        spend: [{ token: "0x55d398326f99059fF775485246999027B3197955", limit: String(BigInt(Math.round(capUsd * 1e18))), period: "day" }],
+        calls: (perms.calls ?? []).map((c: any) => ({ to: c.to })),
+        spend: (perms.spend ?? []).map((s: any) => ({
+          ...(s.token ? { token: s.token } : {}),
+          limit: String(s.limit),
+          period: s.period,
+        })),
       };
 
       const client = new AltanaClient();
@@ -78,7 +90,9 @@ export function HireConsent({
       });
       if (!res.ok) {
         const body = await res.json().catch(() => null);
-        throw new Error(body?.error ?? "failed to save mandate");
+        // Compensating: if persistence fails we leave an onchain session orphaned.
+        // Surface the need to revoke and keep the session key for manual cleanup.
+        throw new Error(body?.error ?? "failed to save mandate — session was granted onchain, revoke via Altana if needed");
       }
       const data = await res.json();
       setWalletAddress(wallet.address);
@@ -169,7 +183,7 @@ export function HireConsent({
 
         <div className="rounded-xl border border-zinc-200 bg-white p-6">
           <h3 className="text-sm font-semibold">Try a tool</h3>
-          <p className="mt-1 text-xs text-zinc-500">Call the agent's MCP tool, validate its calldata, and execute under your session. Read tools return data; write tools go through the full validation + session execution path.</p>
+          <p className="mt-1 text-xs text-zinc-500">Call the agent&apos;s MCP tool, validate its calldata, and execute under your session. Read tools return data; write tools go through the full validation + session execution path.</p>
           {tools.length === 0 ? (
             <p className="mt-4 text-sm text-zinc-500">Loading tools…</p>
           ) : (
