@@ -1,6 +1,6 @@
 "use client";
 
-import { useState } from "react";
+import { useState, useEffect } from "react";
 import { useRouter } from "next/navigation";
 import { AltanaClient, isUserCancelError, isNoKeysRegisteredError, isInsufficientFundsError, extractWalletFromNoKeysError, getAltanaChainId } from "@/lib/altana-client";
 import { buildPermissions } from "@/mandate/permissions";
@@ -50,6 +50,46 @@ export function HireConsent({
   const faucetUrl = isTestnet ? "https://testnet.bnbchain.org/faucet-smart" : "https://www.bnbchain.org/en/testnet-faucet"; // fallback
   const explorerUrl = (addr: string) =>
     isTestnet ? `https://testnet.bscscan.com/address/${addr}` : `https://bscscan.com/address/${addr}`;
+
+  // Restore last hire for this agent after reload / back navigation
+  const storageKey = `vigil:hire:${agentId}`;
+
+  useEffect(() => {
+    let cancelled = false;
+    (async () => {
+      try {
+        const raw = localStorage.getItem(storageKey);
+        if (!raw) return;
+        const saved = JSON.parse(raw) as { walletAddress: string; mandateId: string; capUsd: number; expirySeconds: number };
+        if (!saved.walletAddress || !saved.mandateId) return;
+        const res = await fetch(`/api/mandates?wallet=${saved.walletAddress}`);
+        if (!res.ok) return;
+        const data = (await res.json()) as { mandates: Array<{ id: string; status: string }> };
+        const stillActive = data.mandates?.some((m) => m.id === saved.mandateId && m.status === "active");
+        if (cancelled) return;
+        if (!stillActive) {
+          localStorage.removeItem(storageKey);
+          return;
+        }
+        setWalletAddress(saved.walletAddress);
+        setMandateId(saved.mandateId);
+        if (Number.isFinite(saved.capUsd)) setCapUsd(saved.capUsd);
+        if (Number.isFinite(saved.expirySeconds)) setExpirySeconds(saved.expirySeconds);
+        setPhase("done");
+        fetchTools(agentId);
+      } catch {}
+    })();
+    return () => {
+      cancelled = true;
+    };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [agentId]);
+
+  async function persistHire(walletAddr: string, mId: string) {
+    try {
+      localStorage.setItem(storageKey, JSON.stringify({ walletAddress: walletAddr, mandateId: mId, capUsd, expirySeconds, agentId }));
+    } catch {}
+  }
 
   async function checkBalanceAndProceed(wallet: any, signer: any, walletChainId: number) {
     setPendingWallet({ wallet, signer, chainId: walletChainId });
@@ -128,6 +168,7 @@ export function HireConsent({
       setPhase("done");
       setPendingWallet(null);
       setFundingAddress(null);
+      persistHire(wallet.address, data.id);
       fetchTools(agentId);
     } catch (e: any) {
       if (isInsufficientFundsError(e)) {

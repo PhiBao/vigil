@@ -47,7 +47,37 @@ export function WatchView({
     );
   }
 
-  const active = mandates.filter((m) => m.status === "active");
+  // Deduplicate mandates by agentId — keep latest per agent (avoids duplicate lines after retry)
+  const active = (() => {
+    const seen = new Map<string, (typeof mandates)[number]>();
+    for (const m of mandates.filter((m) => m.status === "active")) {
+      if (!seen.has(m.agentId)) seen.set(m.agentId, m);
+    }
+    return Array.from(seen.values());
+  })();
+
+  // Deduplicate receipts by id and by txHash (prevents duplicate lines from retry)
+  const uniqueReceipts = (() => {
+    const byId = new Map<string, (typeof receipts)[number]>();
+    for (const r of receipts) {
+      if (!byId.has(r.id)) byId.set(r.id, r);
+    }
+    // Second pass: dedupe by txHash+event when txHash exists (same on-chain tx inserted twice)
+    const byTx = new Map<string, (typeof receipts)[number]>();
+    const out: typeof receipts = [];
+    for (const r of byId.values()) {
+      if (r.txHash) {
+        const k = `${r.txHash}:${r.event}`;
+        if (!byTx.has(k)) {
+          byTx.set(k, r);
+          out.push(r);
+        }
+      } else {
+        out.push(r);
+      }
+    }
+    return out;
+  })();
 
   async function revoke(m: MandateRow) {
     setRevoking(m.id);
@@ -69,6 +99,10 @@ export function WatchView({
           body: JSON.stringify({ walletAddress: address, confirmed: true }),
         });
       }
+      // Clear local hire cache for this agent so hire page doesn't restore a revoked mandate
+      try {
+        localStorage.removeItem(`vigil:hire:${m.agentId}`);
+      } catch {}
       window.location.reload();
     } catch (e: any) {
       setRevokeError(String(e?.message ?? e));
@@ -112,13 +146,13 @@ export function WatchView({
       )}
 
       <h2 className="mt-10 text-sm font-semibold uppercase tracking-wide text-zinc-400">Receipts</h2>
-      {receipts.length === 0 ? (
+      {uniqueReceipts.length === 0 ? (
         <p className="mt-3 text-sm text-zinc-500">
           Nothing yet. When an agent acts — or checks in and finds nothing needed — it appears here.
         </p>
       ) : (
         <div className="mt-3 space-y-2">
-          {receipts.map((r) => (
+          {uniqueReceipts.map((r) => (
             <div key={r.id} className="rounded-lg border border-zinc-200 bg-white px-4 py-3">
               <div className="flex items-center justify-between">
                 <span className="text-sm font-medium">{r.event}</span>
