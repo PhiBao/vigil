@@ -48,7 +48,10 @@ export function HireConsent({
 
   const chainId = getAltanaChainId();
   const isTestnet = chainId === 97;
-  const faucetUrl = isTestnet ? "https://testnet.bnbchain.org/faucet-smart" : "https://www.bnbchain.org/en/testnet-faucet"; // fallback
+  const networkName = isTestnet ? "BSC Testnet" : "BSC Mainnet";
+  // Mainnet funding = a plain BNB transfer (any exchange/wallet). Testnet only:
+  // the free faucet.
+  const faucetUrl = "https://testnet.bnbchain.org/faucet-smart";
   const explorerUrl = (addr: string) =>
     isTestnet ? `https://testnet.bscscan.com/address/${addr}` : `https://bscscan.com/address/${addr}`;
 
@@ -200,7 +203,7 @@ export function HireConsent({
     } catch (e: any) {
       if (isInsufficientFundsError(e)) {
         setError(
-          `On-chain session grant failed — the wallet has no gas. Fund ${wallet.address} with a little ${isTestnet ? "testnet " : ""}BNB and click “I've funded — retry”. Details: ${String(e?.message ?? e).slice(0, 300)}`,
+          `Session grant needs a little gas. Send BNB to ${wallet.address}, then tap “I've funded — retry”. Details: ${String(e?.message ?? e).slice(0, 220)}`,
         );
         setFundingAddress(wallet.address);
         setPhase("needsFunding");
@@ -248,7 +251,7 @@ export function HireConsent({
           setFundingAddress(addr);
           setPendingWallet(null);
           setError(
-            `Picked passkey resolves to wallet ${addr}, but that wallet has no keys registered on ${isTestnet ? "testnet" : "mainnet"} yet. Fund ${addr} with a little ${isTestnet ? "testnet " : ""}BNB so the first on-chain registration can succeed, then click “Use existing passkey” again. If this is a fresh device, click “Create new wallet” instead.`,
+            `This passkey resolves to ${addr}, which isn't activated on ${networkName} yet. Send a little BNB to it (activations cost gas), then tap “Use existing passkey” again — or tap “Create new wallet” if you want a separate one.`,
           );
           setPhase("needsFunding");
           setMode(null);
@@ -261,7 +264,7 @@ export function HireConsent({
       } else if (isInsufficientFundsError(e)) {
         const addr = extractWalletFromNoKeysError(e) ?? "";
         setError(
-          `Wallet ${addr ? addr + " " : ""}has no gas for the on-chain registration (Reason: 0x). Fund it with a little ${isTestnet ? "testnet " : ""}BNB and retry. Faucet: ${faucetUrl}`,
+          `${addr ? addr + " " : ""}needs BNB for gas to finish activation. Top it up and tap the button below to continue.`,
         );
         if (addr) setFundingAddress(addr);
         setPhase("needsFunding");
@@ -432,9 +435,11 @@ export function HireConsent({
   if (phase === "needsFunding" && fundingAddress) {
     return (
       <div className="mt-6 rounded-xl border border-amber-200 bg-amber-50 p-6">
-        <h3 className="text-sm font-semibold text-amber-900">Wallet needs gas to register on-chain</h3>
+        <h3 className="text-sm font-semibold text-amber-900">Activate your wallet on {networkName}</h3>
         <p className="mt-2 text-xs text-amber-800">
-          Your wallet <span className="font-mono font-medium">{fundingAddress.slice(0, 10)}…{fundingAddress.slice(-8)}</span> has 0 {isTestnet ? "testnet " : ""}BNB. The first on-chain registration (passkey → Keystore + session) needs a little gas. This is free on testnet.
+          Your wallet <span className="font-mono font-medium">{fundingAddress.slice(0, 10)}…{fundingAddress.slice(-8)}</span>{" "}
+          needs a little BNB for the one-time onchain activation (passkey → Keystore + session). After
+          activation, your daily spend cap — not gas — controls what an agent can move.
         </p>
         <div className="mt-4 rounded-lg border border-amber-200 bg-white p-3 flex items-center gap-2">
           <span className="flex-1 font-mono text-xs truncate">{fundingAddress}</span>
@@ -442,21 +447,32 @@ export function HireConsent({
             onClick={() => navigator.clipboard.writeText(fundingAddress)}
             className="shrink-0 rounded border border-zinc-200 px-2 py-1 text-xs hover:bg-zinc-50"
           >
-            Copy
+            Copy address
           </button>
           <a href={explorerUrl(fundingAddress)} target="_blank" rel="noreferrer" className="shrink-0 text-xs text-sky-600 hover:underline">
             Explorer
           </a>
         </div>
         <div className="mt-4 flex flex-col sm:flex-row gap-3">
-          <a
-            href={faucetUrl}
-            target="_blank"
-            rel="noreferrer"
-            className="flex-1 rounded-lg border border-amber-300 bg-white px-4 py-2.5 text-center text-sm font-medium text-amber-900 hover:bg-amber-100"
-          >
-            Open {isTestnet ? "testnet " : ""}faucet
-          </a>
+          {isTestnet ? (
+            <a
+              href={faucetUrl}
+              target="_blank"
+              rel="noreferrer"
+              className="flex-1 rounded-lg border border-amber-300 bg-white px-4 py-2.5 text-center text-sm font-medium text-amber-900 hover:bg-amber-100"
+            >
+              Open testnet faucet (free)
+            </a>
+          ) : (
+            <a
+              href={`https://www.bnbchain.org/en/what-is-bnb`}
+              target="_blank"
+              rel="noreferrer"
+              className="flex-1 rounded-lg border border-amber-300 bg-white px-4 py-2.5 text-center text-sm font-medium text-amber-900 hover:bg-amber-100"
+            >
+              How to get BNB
+            </a>
+          )}
           <button
             onClick={retryAfterFunding}
             className="flex-1 rounded-lg bg-amber-700 px-4 py-2.5 text-sm font-medium text-white hover:bg-amber-800"
@@ -465,7 +481,9 @@ export function HireConsent({
           </button>
         </div>
         <p className="mt-3 text-[11px] text-amber-700">
-          {isTestnet ? "Fund with 0.05 testnet BNB, wait ~10s for confirmation, then retry. No real funds needed." : "Fund with ~0.01 BNB mainnet, or set NEXT_PUBLIC_ALTANA_CHAIN=testnet and use the free faucet for demo."}
+          {isTestnet
+            ? "Testnet: 0.05 testnet BNB is enough. Wait ~10s after funding, then retry."
+            : "Mainnet: ~0.01–0.02 BNB covers activation and a day of capped agent activity at the default limit. The session cap you set below still bounds what any agent can spend."}
         </p>
         <button
           onClick={() => {
@@ -510,11 +528,13 @@ export function HireConsent({
           </select>
         </label>
       </div>
-      {isTestnet && (
-        <p className="mt-3 text-xs text-sky-600">
-          Demo mode: {chainId === 97 ? "BSC Testnet" : "BSC Mainnet"} — {isTestnet ? "testnet BNB is free from the faucet, no real funds needed." : "mainnet needs real BNB."}
-        </p>
-      )}
+      <p className="mt-3 text-xs text-zinc-500">
+        <span className={`mr-1.5 inline-block h-2 w-2 rounded-full align-middle ${isTestnet ? "bg-amber-400" : "bg-emerald-500"}`} />
+        {networkName}
+        {isTestnet
+          ? " — testnet tokens, no real value. Get free BNB from the faucet."
+          : " — real BNB, real caps. Your daily limit is enforced onchain; revoke any time."}
+      </p>
 
       <div className="mt-6">
         <h3 className="text-sm font-medium text-zinc-800">Choose a passkey action</h3>

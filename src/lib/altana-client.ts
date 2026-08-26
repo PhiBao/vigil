@@ -26,17 +26,19 @@ function rpId(): string | undefined {
   return window.location.hostname || undefined;
 }
 
-/** Which chain to use for Altana. Testnet is free via faucet, mainnet needs real BNB. */
+/**
+ * Which chain Vigil runs on. MAINNET IS THE DEFAULT — this is a product about
+ * real positions and real caps, so sessions are granted on BSC Mainnet unless
+ * the operator explicitly opts into testnet via
+ * NEXT_PUBLIC_ALTANA_CHAIN=testnet (or =97).
+ *
+ * There is deliberately no hostname heuristic: past versions silently flipped
+ * every *.vercel.app deployment to testnet, which made production behavior
+ * depend on where the page was served from instead of on configuration.
+ */
 export function getAltanaChainId(): number {
-  // Allow explicit override via env
   const env = (process.env.NEXT_PUBLIC_ALTANA_CHAIN ?? "").toLowerCase();
   if (env === "testnet" || env === "97") return 97;
-  if (env === "mainnet" || env === "56") return 56;
-  if (typeof window !== "undefined") {
-    const host = window.location.hostname;
-    // Vercel preview + localhost default to testnet for free demo funding
-    if (host.includes("vercel.app") || host === "localhost" || host === "127.0.0.1") return 97;
-  }
   return 56;
 }
 

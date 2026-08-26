@@ -271,9 +271,11 @@ pnpm tsx scripts/test-scan.mts [address ...]
   `tools/list` probe is often the first real evidence, so `verifyAgent` re-runs the classifier on
   verified tools.
 
-### Testnet funding
+### Networks
 
-The Altana testnet relay faucet is a broken stub (verified), so testnet BNB comes from the interactive faucet:
+**Mainnet is the default.** Altana sessions, Keystore registrations and receipts land on BSC Mainnet (chain 56) unless `NEXT_PUBLIC_ALTANA_CHAIN=testnet` is set — there is no hostname heuristic, so production behavior never depends on where the page is served from. Mainnet funding is a plain BNB transfer (~0.01–0.02 covers activation plus capped agent activity).
+
+For local development you can opt into testnet (`NEXT_PUBLIC_ALTANA_CHAIN=testnet`). The testnet relay faucet is a broken stub (verified), so testnet BNB comes from the interactive faucet:
 
 ```bash
 pnpm tsx scripts/setup-testnet.mts    # prints the wallet address to fund
@@ -338,7 +340,7 @@ Nothing in the build or the sub-tracks requires waiting — the work is executab
 - [x] Classifier regression tests: `pnpm test` (11 cases from real captured tool lists; every past mislabel is a pinned case)
 - [x] Throttle obeys measured API limits (180/min, 20k/day) and re-tunes from response headers
 - [x] TermiX Agent Advantage Report: 3 tasks via verified agents (Venus, V3 Pools, Beefy) — `data/agent-advantage.md`
-- [x] Altana track: testnet session proven; mainnet is optional for the "stronger" score
+- [x] Altana track: session mechanics proven on testnet end-to-end; **production runs on mainnet by default** (opt-in testnet for local dev only)
 - [x] PancakeSwap demo: V3 Pools (LP range) + Token Swaps (bounded swap) via the hire rail, allowlisted to PancakeSwap contracts
 - [ ] Re-run `pnpm seed` against the production Postgres (Neon) so the deployed catalog matches this repo's verified state
 - [ ] 8004scan Pro key application → verification cadence headroom (anonymous tier already measured generous: 180/min)

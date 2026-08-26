@@ -76,7 +76,7 @@ export default async function Home() {
 
       <footer className="border-t border-zinc-200 bg-white py-6">
         <div className="mx-auto max-w-5xl px-6 flex items-center justify-between text-xs text-zinc-400">
-          <span>Vigil · Built for the Build the Era hackathon</span>
+          <span>Vigil · the agent marketplace for BNB Smart Chain</span>
           <span>Classified by tool signature · verified by live checks</span>
         </div>
       </footer>
