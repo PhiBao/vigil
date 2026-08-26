@@ -2,11 +2,12 @@
 
 import { useState } from "react";
 import { useRouter } from "next/navigation";
-import { AltanaClient } from "@/lib/altana-client";
+import { AltanaClient, isUserCancelError } from "@/lib/altana-client";
 import { buildPermissions } from "@/mandate/permissions";
 import type { Category } from "@/registry/model";
 
 type Phase = "form" | "prompting" | "granting" | "done" | "error";
+type Mode = "recover" | "create";
 
 interface ToolDef {
   name: string;
@@ -30,6 +31,7 @@ export function HireConsent({
   const [capUsd, setCapUsd] = useState(defaultCapUsd);
   const [expirySeconds, setExpirySeconds] = useState(defaultExpirySeconds);
   const [phase, setPhase] = useState<Phase>("form");
+  const [mode, setMode] = useState<Mode | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [walletAddress, setWalletAddress] = useState<string | null>(null);
   const [mandateId, setMandateId] = useState<string | null>(null);
@@ -40,12 +42,12 @@ export function HireConsent({
   const [execResult, setExecResult] = useState<any>(null);
   const router = useRouter();
 
-  async function grant() {
+  async function grantWithMode(requestedMode: Mode) {
+    setMode(requestedMode);
     setPhase("prompting");
     setError(null);
     try {
       if (!Number.isFinite(capUsd) || capUsd <= 0) throw new Error("invalid cap");
-      // Single source of truth: buildPermissions derives both calls and spend (incl. WBNB + native).
       const perms = buildPermissions(category, {
         capUsd,
         expirySeconds,
@@ -70,6 +72,7 @@ export function HireConsent({
 
       const client = new AltanaClient();
       const { wallet, session, sessionKey } = await client.grant({
+        mode: requestedMode,
         permissions: sdkPermissions,
         expirySeconds,
       });
@@ -90,19 +93,39 @@ export function HireConsent({
       });
       if (!res.ok) {
         const body = await res.json().catch(() => null);
-        // Compensating: if persistence fails we leave an onchain session orphaned.
-        // Surface the need to revoke and keep the session key for manual cleanup.
         throw new Error(body?.error ?? "failed to save mandate — session was granted onchain, revoke via Altana if needed");
       }
       const data = await res.json();
       setWalletAddress(wallet.address);
       setMandateId(data.id);
       setPhase("done");
-      // Fetch tools for execution
       fetchTools(agentId);
     } catch (e: any) {
-      setError(String(e?.message ?? e));
+      // User-cancelled WebAuthn should not auto-trigger the other flow.
+      // Show a friendly retry message and return to form.
+      if (isUserCancelError(e)) {
+        const isCreate = requestedMode === "create";
+        setError(
+          isCreate
+            ? "Passkey creation was cancelled. Click “Create new wallet” to try again, or use an existing passkey if you already have one."
+            : "Passkey was cancelled or no passkey was selected. Try again, or click “Create new wallet” if this is your first time on this device.",
+        );
+        setPhase("form");
+        setMode(null);
+        return;
+      }
+      // Known recover edge: wallet has no on-chain keys yet or wrong credential
+      const msg = String(e?.message ?? e);
+      if (msg.includes("has no keys registered") || msg.includes("doesn't carry a wallet address")) {
+        setError(
+          msg +
+            " — This usually means no Vigil wallet exists for this passkey on this domain. Click “Create new wallet” instead.",
+        );
+      } else {
+        setError(msg);
+      }
       setPhase("error");
+      setMode(null);
     }
   }
 
@@ -114,7 +137,6 @@ export function HireConsent({
       setTools(list);
       if (list.length > 0) {
         setSelectedTool(list[0].name);
-        // Prefill args with required fields
         const t = list[0];
         const props = t.inputSchema?.properties ?? {};
         const required = t.inputSchema?.required ?? Object.keys(props);
@@ -255,6 +277,8 @@ export function HireConsent({
     );
   }
 
+  const isPrompting = phase === "prompting";
+
   return (
     <div className="mt-6 rounded-xl border border-zinc-200 bg-white p-6">
       <h2 className="text-sm font-semibold uppercase tracking-wide text-zinc-400">Set your limits</h2>
@@ -283,21 +307,53 @@ export function HireConsent({
         </label>
       </div>
 
-      <button
-        onClick={grant}
-        disabled={phase === "prompting" || phase === "granting"}
-        className="mt-5 w-full rounded-lg bg-zinc-900 px-4 py-3 text-sm font-medium text-white hover:bg-zinc-700 disabled:opacity-60"
-      >
-        {phase === "prompting" ? "Confirm in your device…" : "Approve with passkey"}
-      </button>
+      <div className="mt-6">
+        <h3 className="text-sm font-medium text-zinc-800">Choose a passkey action</h3>
+        <p className="mt-1 text-xs text-zinc-500">
+          Use an existing passkey if you&apos;ve used Vigil on this device before. First time here? Create a new wallet — it takes one biometric prompt.
+        </p>
+        <div className="mt-4 grid grid-cols-1 sm:grid-cols-2 gap-3">
+          <button
+            onClick={() => grantWithMode("recover")}
+            disabled={isPrompting}
+            className="rounded-lg bg-zinc-900 px-4 py-3 text-sm font-medium text-white hover:bg-zinc-700 disabled:opacity-60 flex flex-col items-center gap-1"
+          >
+            <span>{isPrompting && mode === "recover" ? "Check your device…" : "Use existing passkey"}</span>
+            <span className="text-[11px] font-normal text-zinc-300">Face ID / Touch ID picker</span>
+          </button>
+          <button
+            onClick={() => grantWithMode("create")}
+            disabled={isPrompting}
+            className="rounded-lg border border-zinc-300 bg-white px-4 py-3 text-sm font-medium text-zinc-800 hover:bg-zinc-50 disabled:opacity-60 flex flex-col items-center gap-1"
+          >
+            <span>{isPrompting && mode === "create" ? "Check your device…" : "Create new wallet"}</span>
+            <span className="text-[11px] font-normal text-zinc-500">One-time setup</span>
+          </button>
+        </div>
+      </div>
 
-      <p className="mt-3 text-xs text-zinc-400">
-        Uses Face ID / Touch ID (WebAuthn). No seed phrase. The session key is scoped to exactly
-        what&apos;s shown above and registered in Altana&apos;s public Keystore.
+      <p className="mt-4 text-xs text-zinc-400">
+        No seed phrase. The session key is scoped to exactly what&apos;s shown above and registered in Altana&apos;s public Keystore. You can revoke it any time.
       </p>
 
-      {phase === "error" && (
-        <p className="mt-3 rounded-md bg-red-50 border border-red-200 px-3 py-2 text-xs text-red-700">{error}</p>
+      {error && (
+        <div className="mt-4 rounded-md bg-amber-50 border border-amber-200 px-3 py-3">
+          <p className="text-xs font-medium text-amber-900">Passkey didn&apos;t complete</p>
+          <p className="mt-1 text-xs text-amber-800">{error}</p>
+          <button
+            onClick={() => {
+              setError(null);
+              setPhase("form");
+              setMode(null);
+            }}
+            className="mt-2 text-xs font-medium text-amber-900 underline hover:text-amber-700"
+          >
+            Dismiss
+          </button>
+        </div>
+      )}
+      {phase === "error" && !error && (
+        <p className="mt-3 rounded-md bg-red-50 border border-red-200 px-3 py-2 text-xs text-red-700">Something went wrong. Please try again.</p>
       )}
     </div>
   );
