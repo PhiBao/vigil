@@ -158,7 +158,7 @@ pnpm dev                     # http://localhost:3000
 
 | Variable | Purpose |
 |---|---|
-| `DATABASE_URL` | Postgres URL. If unset, a file store at `data/vigil.json` is used (dev/demo). |
+| `DATABASE_URL` | Postgres URL (e.g. Neon). **Required on Vercel** — without it serverless runs use a non-persistent memory store and log an error. Locally absent `DATABASE_URL` uses a dev file store at `$TMPDIR/vigil-data.json`. |
 | `MANDATE_ENCRYPTION_KEY` | AES-256-GCM key for encrypting agent session keys at rest. **Set in production** (a dev key is used with a warning otherwise). |
 | `AGENT_RUN_KEY` | Protects the `?op=verify` and `confirm=1` endpoints. |
 | `RATE_LIMIT_PER_MIN` | Overrides the 8004scan per-minute budget (default 180, measured from response headers; day budget 20k also enforced). |
@@ -199,7 +199,8 @@ What the description DOES drive: **`claimedOnly`** — capabilities the publishe
 
 `Store` interface with two implementations:
 - **Postgres** (`DATABASE_URL` set): `mandates`, `receipts`, `proving_runs`, `agents` tables.
-- **File store** (`data/vigil.json`): atomic-ish writes, Date revival, zero setup.
+- **Dev file store** (`$TMPDIR/vigil-data.json`, static path so Next's tracer stays precise): atomic-ish writes, Date revival, zero setup. Ephemeral by design.
+- **Serverless memory store**: if `VERCEL`/`AWS_LAMBDA_FUNCTION_NAME` is set and `DATABASE_URL` is missing, persistence calls fail honest instead of silently losing data.
 
 ---
 
@@ -343,7 +344,7 @@ Nothing in the build or the sub-tracks requires waiting — the work is executab
 - [ ] 8004scan Pro key application → verification cadence headroom (anonymous tier already measured generous: 180/min)
 - [ ] Judging-window hardening + judge demo path (polish empty/loading/error states for thin categories)
 
-**Judging window:** Sep 9 – 23. Winner announced Nov 5. The marketplace must stay live and cheap through then. File store is ephemeral on serverless — set `DATABASE_URL` for persistent mandates in production.
+**Judging window:** Sep 9 – 23. Winner announced Nov 5. The marketplace must stay live and cheap through then. Without `DATABASE_URL` on Vercel the app boots but nothing persists. Set it once in Vercel > Settings > Environment Variables.
 
 ---
 

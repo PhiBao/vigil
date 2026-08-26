@@ -1,4 +1,6 @@
 import postgres from "postgres";
+import { join } from "node:path";
+import { tmpdir } from "node:os";
 import type { Store, MandateRecord, ReceiptRecord, RunRecord } from "./store";
 import { fileStore } from "./file-store";
 import { logger } from "../lib/logger";
@@ -160,19 +162,116 @@ function buildPgStore(sql: postgres.Sql): Store {
   };
 }
 
+/**
+ * In-memory store used ONLY when running on a serverless platform without
+ * DATABASE_URL. The alternative (the file store) would silently accept writes
+ * to /tmp and lose every mandate between instances — a correctness trap that
+ * looks like data loss "at random". This fails loudly instead: browse stays
+ * functional, but any persistence-dependent action warns and the boot log
+ * tells the operator exactly what to set.
+ */
+function buildMemoryStore(): Store {
+  logger.error(
+    "DATABASE_URL is not set on a serverless platform — mandates, receipts and agent seeds " +
+      "will NOT persist across requests. Set DATABASE_URL (e.g. Neon) in Vercel > Settings > Environment Variables.",
+  );
+  const mandates: MandateRecord[] = [];
+  const receipts: ReceiptRecord[] = [];
+  const runs: RunRecord[] = [];
+  const agents: unknown[] = [];
+  return {
+    async createMandate(m) {
+      mandates.push(m);
+    },
+    async getMandate(id) {
+      return mandates.find((m) => m.id === id) ?? null;
+    },
+    async listMandates(w) {
+      const ws = w.toLowerCase();
+      return mandates
+        .filter((m) => m.walletAddress.toLowerCase() === ws)
+        .sort((a, b) => b.createdAt.getTime() - a.createdAt.getTime());
+    },
+    async listActiveMandates() {
+      const now = Date.now();
+      return mandates.filter((m) => m.status === "active" && m.expirySeconds * 1000 > now);
+    },
+    async setMandateStatus(id, status, revokedAt) {
+      const m = mandates.find((x) => x.id === id);
+      if (m) {
+        m.status = status;
+        if (revokedAt) m.revokedAt = revokedAt;
+      }
+    },
+    async addReceipt(r) {
+      receipts.push(r);
+    },
+    async listReceipts(walletAddress, limit = 50) {
+      const ids = new Set(mandates.filter((m) => m.walletAddress.toLowerCase() === walletAddress.toLowerCase()).map((m) => m.id));
+      return receipts
+        .filter((r) => ids.has(r.mandateId))
+        .sort((a, b) => b.createdAt.getTime() - a.createdAt.getTime())
+        .slice(0, limit);
+    },
+    async addRun(r) {
+      runs.push(r);
+    },
+    async updateRun(id, patch) {
+      const r = runs.find((x) => x.id === id);
+      if (r) Object.assign(r, patch);
+    },
+    async listRuns(agentId?) {
+      const out = agentId ? runs.filter((r) => r.agentId === agentId) : [...runs];
+      return out.sort((a, b) => b.startedAt.getTime() - a.startedAt.getTime());
+    },
+    async upsertAgent(agent: any) {
+      const i = agents.findIndex((a: any) => a.agentId === agent.agentId);
+      if (i >= 0) agents[i] = agent;
+      else agents.push(agent as never);
+    },
+    async deleteAgent(agentId) {
+      const i = agents.findIndex((a: any) => a.agentId === agentId);
+      if (i >= 0) agents.splice(i, 1);
+    },
+    async listAgents(category?) {
+      const all = agents as any[];
+      if (!category) return [...all];
+      return all.filter((a) => (a.categories ?? []).includes(category));
+    },
+    async getAgent(agentId) {
+      return (agents as any[]).find((a) => a.agentId === agentId) ?? null;
+    },
+    async countAgents() {
+      return agents.length;
+    },
+  };
+}
+
+const isServerless = Boolean(process.env.VERCEL || process.env.AWS_LAMBDA_FUNCTION_NAME);
+
 /** The active store. */
 export function store(): Store {
   if (pg) {
     if (!pgStore) pgStore = buildPgStore(pg);
     return pgStore;
   }
+  if (isServerless) {
+    if (!memoryStore) memoryStore = buildMemoryStore();
+    return memoryStore;
+  }
   return fileStore;
 }
+
+let memoryStore: Store | null = null;
 
 /** Idempotent schema init. */
 export async function initDb(): Promise<void> {
   if (!pg) {
-    logger.info("using file store (no DATABASE_URL)");
+    if (isServerless) {
+      logger.error("initDb: no DATABASE_URL on serverless — using non-persistent memory store");
+    } else {
+      logger.info({ file: join(tmpdir(), "vigil-data.json") }, "using tmp file store (no DATABASE_URL)");
+    }
     return;
   }
   await pg`

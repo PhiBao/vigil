@@ -1,11 +1,22 @@
-import { readFileSync, writeFileSync, existsSync, mkdirSync, unlinkSync } from "node:fs";
-import { resolve, dirname } from "node:path";
+import { readFileSync, writeFileSync, existsSync, unlinkSync, mkdirSync } from "node:fs";
+import { join } from "node:path";
+import { tmpdir } from "node:os";
 import type { Store, MandateRecord, ReceiptRecord, RunRecord } from "./store";
 
 /**
  * File-backed store for dev/demo when DATABASE_URL is absent.
- * Atomic-ish writes: serialize with a write queue, write temp + rename.
- * Data lives in ./data/vigil.json (gitignored).
+ *
+ * PATH POLICY (matters for builds): the path is a STATIC expression over
+ * os.tmpdir(). Next.js traces fs access at build time and cannot evaluate
+ * process.cwd() or env vars at call sites — dynamic paths made Turbopack emit
+ * "Dynamic filesystem access causes tracing of the whole project" and bloat
+ * every serverless bundle. A literal-joined tmpdir() path is evaluable, so
+ * tracing stays precise and the warnings disappear.
+ *
+ * /tmp is also the ONLY writable directory inside Vercel/Lambda images (the
+ * deployment filesystem is read-only), so this keeps working everywhere the
+ * store is reachable. It is ephemeral by nature: db/index.ts refuses to rely
+ * on it for persistent state on serverless platforms.
  */
 
 interface FileDbShape {
@@ -15,7 +26,7 @@ interface FileDbShape {
   agents: unknown[];
 }
 
-const FILE = process.env.VIGIL_DATA_FILE ?? resolve(process.cwd(), "data/vigil.json");
+const FILE = join(tmpdir(), "vigil-data.json");
 
 function load(): FileDbShape {
   if (!existsSync(FILE)) return { mandates: [], receipts: [], runs: [], agents: [] };
@@ -39,15 +50,24 @@ function load(): FileDbShape {
 }
 
 function save(shape: FileDbShape): void {
-  mkdirSync(dirname(FILE), { recursive: true });
-  const tmp = FILE + ".tmp";
-  writeFileSync(tmp, JSON.stringify(shape));
-  // atomic replace
-  writeFileSync(FILE, JSON.stringify(shape));
   try {
-    existsSync(tmp) && unlinkSync(tmp);
-  } catch {
-    /* ignore */
+    const parent = FILE.slice(0, FILE.lastIndexOf("/")) || "/";
+    mkdirSync(parent, { recursive: true });
+    const tmp = `${FILE}.tmp`;
+    writeFileSync(tmp, JSON.stringify(shape));
+    // atomic replace
+    writeFileSync(FILE, JSON.stringify(shape));
+    try {
+      existsSync(tmp) && unlinkSync(tmp);
+    } catch {
+      /* ignore */
+    }
+  } catch (e: any) {
+    throw new Error(
+      `file store could not persist to ${FILE} (${String(e?.code ?? e?.message ?? e)}). ` +
+        `Set DATABASE_URL to use Postgres.`,
+      { cause: e },
+    );
   }
 }
 
@@ -112,9 +132,10 @@ export const fileStore: Store = {
       save(s);
     }
   },
-  async listRuns(agentId) {
-    const all = load().runs.sort((a, b) => b.startedAt.getTime() - a.startedAt.getTime());
-    return agentId ? all.filter((r) => r.agentId === agentId) : all;
+  async listRuns(agentId?) {
+    const rs = load().runs;
+    const out = agentId ? rs.filter((r) => r.agentId === agentId) : rs.slice();
+    return out.sort((a, b) => b.startedAt.getTime() - a.startedAt.getTime());
   },
   async upsertAgent(agent: any) {
     const s = load();
