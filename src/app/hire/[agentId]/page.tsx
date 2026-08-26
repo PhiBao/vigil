@@ -60,6 +60,11 @@ export default async function HirePage({
           capped and revocable. It proposes actions; your session decides — and the cap is enforced
           onchain, not by Vigil.
         </p>
+        <p className="mt-2 rounded-lg border border-sky-200 bg-sky-50 px-3 py-2 text-xs text-sky-900">
+          After approving you&apos;ll also get a one-time <span className="font-medium">run token</span> and a
+          copy-paste request — hand both to a cron job or AI operator to let the agent run for you
+          unattended, inside these same caps. Revoking ends it instantly.
+        </p>
 
         <div className="mt-6 rounded-xl border border-zinc-200 bg-white p-6">
           <h2 className="text-sm font-semibold uppercase tracking-wide text-zinc-400">

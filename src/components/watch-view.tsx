@@ -1,12 +1,13 @@
 "use client";
 
-import { useState } from "react";
+import { useState, useEffect } from "react";
 import { AltanaClient } from "@/lib/altana-client";
 
 interface MandateRow {
   id: string;
   agent: string;
   agentId: string;
+  category?: string;
   capUsd: number;
   expirySeconds: number;
   status: string;
@@ -35,6 +36,11 @@ export function WatchView({
 }) {
   const [revoking, setRevoking] = useState<string | null>(null);
   const [revokeError, setRevokeError] = useState<string | null>(null);
+  const [origin, setOrigin] = useState("");
+
+  useEffect(() => {
+    setOrigin(window.location.origin);
+  }, []);
 
   if (!dbOk) {
     return (
@@ -145,6 +151,58 @@ export function WatchView({
         </div>
       )}
 
+      <h2 className="mt-10 text-sm font-semibold uppercase tracking-wide text-zinc-400">Runners &amp; autonomy</h2>
+      {active.length > 0 ? (
+        <div className="mt-3 rounded-xl border border-sky-200 bg-white p-5">
+          <p className="text-sm text-zinc-700">
+            Every hire issues a one-time <span className="font-medium">run token</span> (shown right after
+            approving with your passkey). Hand it to your own runner — a cron job, a CLI loop, or an AI
+            operator — and it can call your hired agents unattended. The token authenticates but does not
+            authorize: each call passes calldata validation, a live simulation, and the onchain spend caps,
+            and revoking the mandate above kills it instantly.
+          </p>
+          <details className="mt-3" open={active.length === 1}>
+            <summary className="cursor-pointer text-xs font-medium text-sky-700">
+              Show copy-paste request{active.length > 1 ? "s" : ""} ({active.length})
+            </summary>
+            <div className="mt-2 space-y-2">
+              {active.map((m) => {
+                const label = m.category ? m.category.replace(/_/g, " ") : "agent";
+                const curl = `curl -X POST ${origin || "https://your-vigil-app.vercel.app"}/api/hire \\
+  -H "Authorization: Bearer $VIGIL_RUN_TOKEN" \\
+  -H "Content-Type: application/json" \\
+  -d '{
+    "agentId": "${m.agentId}",
+    "mandateId": "${m.id}",
+    "tool": "<tool-name>",
+    "args": { },
+    "dryRun": true
+  }'`;
+                return (
+                  <div key={m.id} className="relative">
+                    <div className="mb-1 text-xs text-zinc-500">
+                      {label} · cap ${m.capUsd}/day
+                    </div>
+                    <pre className="overflow-auto rounded-lg bg-zinc-900 p-3 pr-16 text-[11px] leading-relaxed text-zinc-100">{curl}</pre>
+                    <CopyBtn text={curl} />
+                  </div>
+                );
+              })}
+            </div>
+          </details>
+          <p className="mt-3 text-[11px] text-zinc-400">
+            Replace <code className="font-mono">$VIGIL_RUN_TOKEN</code> with the token you saved at hire time —
+            Vigil stores only its hash and never shows it twice. Lost it? Revoke and re-hire (one biometric
+            prompt) to rotate. Tool names + JSON schemas:{" "}
+            <a className="text-sky-600 hover:underline" href={`/api/agent/${encodeURIComponent(active[0].agentId)}/tools`}>
+              /api/agent/…/tools
+            </a>.
+          </p>
+        </div>
+      ) : (
+        <p className="mt-3 text-sm text-zinc-500">No active hires — autonomy comes with your first agent.</p>
+      )}
+
       <h2 className="mt-10 text-sm font-semibold uppercase tracking-wide text-zinc-400">Receipts</h2>
       {uniqueReceipts.length === 0 ? (
         <p className="mt-3 text-sm text-zinc-500">
@@ -185,4 +243,22 @@ export function WatchView({
 
 function fmt(n: number): string {
   return "$" + n.toLocaleString("en-US", { maximumFractionDigits: 0 });
+}
+
+function CopyBtn({ text }: { text: string }) {
+  const [copied, setCopied] = useState(false);
+  return (
+    <button
+      onClick={async () => {
+        try {
+          await navigator.clipboard.writeText(text);
+          setCopied(true);
+          setTimeout(() => setCopied(false), 1600);
+        } catch {}
+      }}
+      className="absolute right-2 top-6 rounded border border-zinc-600 px-2 py-1 text-[11px] text-zinc-300 hover:bg-zinc-800"
+    >
+      {copied ? "Copied!" : "Copy"}
+    </button>
+  );
 }
