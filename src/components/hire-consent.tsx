@@ -2,11 +2,12 @@
 
 import { useState } from "react";
 import { useRouter } from "next/navigation";
-import { AltanaClient, isUserCancelError } from "@/lib/altana-client";
+import { AltanaClient, isUserCancelError, isNoKeysRegisteredError, isInsufficientFundsError, extractWalletFromNoKeysError, getAltanaChainId } from "@/lib/altana-client";
 import { buildPermissions } from "@/mandate/permissions";
+import { getPublicClient } from "@/lib/rpc";
 import type { Category } from "@/registry/model";
 
-type Phase = "form" | "prompting" | "granting" | "done" | "error";
+type Phase = "form" | "prompting" | "checking" | "needsFunding" | "granting" | "done" | "error";
 type Mode = "recover" | "create";
 
 interface ToolDef {
@@ -34,6 +35,8 @@ export function HireConsent({
   const [mode, setMode] = useState<Mode | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [walletAddress, setWalletAddress] = useState<string | null>(null);
+  const [fundingAddress, setFundingAddress] = useState<string | null>(null);
+  const [pendingWallet, setPendingWallet] = useState<{ wallet: any; signer: any; chainId: number } | null>(null);
   const [mandateId, setMandateId] = useState<string | null>(null);
   const [tools, setTools] = useState<ToolDef[]>([]);
   const [selectedTool, setSelectedTool] = useState<string>("");
@@ -42,9 +45,32 @@ export function HireConsent({
   const [execResult, setExecResult] = useState<any>(null);
   const router = useRouter();
 
-  async function grantWithMode(requestedMode: Mode) {
-    setMode(requestedMode);
-    setPhase("prompting");
+  const chainId = getAltanaChainId();
+  const isTestnet = chainId === 97;
+  const faucetUrl = isTestnet ? "https://testnet.bnbchain.org/faucet-smart" : "https://www.bnbchain.org/en/testnet-faucet"; // fallback
+  const explorerUrl = (addr: string) =>
+    isTestnet ? `https://testnet.bscscan.com/address/${addr}` : `https://bscscan.com/address/${addr}`;
+
+  async function checkBalanceAndProceed(wallet: any, signer: any, walletChainId: number) {
+    setPendingWallet({ wallet, signer, chainId: walletChainId });
+    setFundingAddress(wallet.address);
+    // Check balance before attempting on-chain grant — new wallets start at 0 and will fail with 0x
+    try {
+      setPhase("checking");
+      const client = getPublicClient(walletChainId);
+      const bal = await client.getBalance({ address: wallet.address as `0x${string}` });
+      if (bal === 0n) {
+        setPhase("needsFunding");
+        return false;
+      }
+    } catch {
+      // If balance check fails (RPC flake), proceed to grant and let it fail with proper error handling
+    }
+    return true;
+  }
+
+  async function doGrant(wallet: any, signer: any, walletChainId: number) {
+    setPhase("granting");
     setError(null);
     try {
       if (!Number.isFinite(capUsd) || capUsd <= 0) throw new Error("invalid cap");
@@ -71,10 +97,11 @@ export function HireConsent({
       };
 
       const client = new AltanaClient();
-      const { wallet, session, sessionKey } = await client.grant({
-        mode: requestedMode,
+      // Use the already-obtained wallet+signer to avoid a second WebAuthn prompt
+      const { session, sessionKey } = await client.grantWithWallet(wallet, signer, {
         permissions: sdkPermissions,
         expirySeconds,
+        chainId: walletChainId,
       });
 
       const res = await fetch("/api/mandates", {
@@ -99,10 +126,42 @@ export function HireConsent({
       setWalletAddress(wallet.address);
       setMandateId(data.id);
       setPhase("done");
+      setPendingWallet(null);
+      setFundingAddress(null);
       fetchTools(agentId);
     } catch (e: any) {
-      // User-cancelled WebAuthn should not auto-trigger the other flow.
-      // Show a friendly retry message and return to form.
+      if (isInsufficientFundsError(e)) {
+        setError(
+          `On-chain session grant failed — the wallet has no gas. Fund ${wallet.address} with a little ${isTestnet ? "testnet " : ""}BNB and click “I've funded — retry”. Details: ${String(e?.message ?? e).slice(0, 300)}`,
+        );
+        setFundingAddress(wallet.address);
+        setPhase("needsFunding");
+        return;
+      }
+      setError(String(e?.message ?? e));
+      setPhase("error");
+    }
+  }
+
+  async function grantWithMode(requestedMode: Mode) {
+    setMode(requestedMode);
+    setPhase("prompting");
+    setError(null);
+    setFundingAddress(null);
+    try {
+      const client = new AltanaClient();
+      const res =
+        requestedMode === "create"
+          ? await client.createWallet("Vigil")
+          : await client.recoverWallet();
+      const { wallet, signer, chainId: walletChainId } = res;
+
+      // Check if wallet needs funding before attempting grant
+      const shouldProceed = await checkBalanceAndProceed(wallet, signer, walletChainId);
+      if (!shouldProceed) return;
+
+      await doGrant(wallet, signer, walletChainId);
+    } catch (e: any) {
       if (isUserCancelError(e)) {
         const isCreate = requestedMode === "create";
         setError(
@@ -114,18 +173,60 @@ export function HireConsent({
         setMode(null);
         return;
       }
-      // Known recover edge: wallet has no on-chain keys yet or wrong credential
-      const msg = String(e?.message ?? e);
-      if (msg.includes("has no keys registered") || msg.includes("doesn't carry a wallet address")) {
+      if (isNoKeysRegisteredError(e)) {
+        const addr = extractWalletFromNoKeysError(e);
+        if (addr) {
+          // This wallet exists as a passkey but has never been deployed on this chain — needs funding/deployment
+          setFundingAddress(addr);
+          setPendingWallet(null);
+          setError(
+            `Picked passkey resolves to wallet ${addr}, but that wallet has no keys registered on ${isTestnet ? "testnet" : "mainnet"} yet. Fund ${addr} with a little ${isTestnet ? "testnet " : ""}BNB so the first on-chain registration can succeed, then click “Use existing passkey” again. If this is a fresh device, click “Create new wallet” instead.`,
+          );
+          setPhase("needsFunding");
+          setMode(null);
+          return;
+        }
         setError(
-          msg +
+          String(e?.message ?? e) +
             " — This usually means no Vigil wallet exists for this passkey on this domain. Click “Create new wallet” instead.",
         );
+      } else if (isInsufficientFundsError(e)) {
+        const addr = extractWalletFromNoKeysError(e) ?? "";
+        setError(
+          `Wallet ${addr ? addr + " " : ""}has no gas for the on-chain registration (Reason: 0x). Fund it with a little ${isTestnet ? "testnet " : ""}BNB and retry. Faucet: ${faucetUrl}`,
+        );
+        if (addr) setFundingAddress(addr);
+        setPhase("needsFunding");
+        setMode(null);
+        return;
       } else {
-        setError(msg);
+        setError(String(e?.message ?? e));
       }
       setPhase("error");
       setMode(null);
+    }
+  }
+
+  async function retryAfterFunding() {
+    if (!pendingWallet) {
+      setError("No wallet to retry. Please click “Use existing passkey” again after funding.");
+      setPhase("form");
+      return;
+    }
+    // Re-check balance, then retry grant
+    try {
+      setPhase("checking");
+      const client = getPublicClient(pendingWallet.chainId);
+      const bal = await client.getBalance({ address: pendingWallet.wallet.address as `0x${string}` });
+      if (bal === 0n) {
+        setError(`Wallet ${pendingWallet.wallet.address} still has 0 balance. Fund it first and try again.`);
+        setPhase("needsFunding");
+        return;
+      }
+      await doGrant(pendingWallet.wallet, pendingWallet.signer, pendingWallet.chainId);
+    } catch (e: any) {
+      setError(String(e?.message ?? e));
+      setPhase("error");
     }
   }
 
@@ -277,7 +378,61 @@ export function HireConsent({
     );
   }
 
-  const isPrompting = phase === "prompting";
+  const isBusy = phase === "prompting" || phase === "checking" || phase === "granting";
+
+  if (phase === "needsFunding" && fundingAddress) {
+    return (
+      <div className="mt-6 rounded-xl border border-amber-200 bg-amber-50 p-6">
+        <h3 className="text-sm font-semibold text-amber-900">Wallet needs gas to register on-chain</h3>
+        <p className="mt-2 text-xs text-amber-800">
+          Your wallet <span className="font-mono font-medium">{fundingAddress.slice(0, 10)}…{fundingAddress.slice(-8)}</span> has 0 {isTestnet ? "testnet " : ""}BNB. The first on-chain registration (passkey → Keystore + session) needs a little gas. This is free on testnet.
+        </p>
+        <div className="mt-4 rounded-lg border border-amber-200 bg-white p-3 flex items-center gap-2">
+          <span className="flex-1 font-mono text-xs truncate">{fundingAddress}</span>
+          <button
+            onClick={() => navigator.clipboard.writeText(fundingAddress)}
+            className="shrink-0 rounded border border-zinc-200 px-2 py-1 text-xs hover:bg-zinc-50"
+          >
+            Copy
+          </button>
+          <a href={explorerUrl(fundingAddress)} target="_blank" rel="noreferrer" className="shrink-0 text-xs text-sky-600 hover:underline">
+            Explorer
+          </a>
+        </div>
+        <div className="mt-4 flex flex-col sm:flex-row gap-3">
+          <a
+            href={faucetUrl}
+            target="_blank"
+            rel="noreferrer"
+            className="flex-1 rounded-lg border border-amber-300 bg-white px-4 py-2.5 text-center text-sm font-medium text-amber-900 hover:bg-amber-100"
+          >
+            Open {isTestnet ? "testnet " : ""}faucet
+          </a>
+          <button
+            onClick={retryAfterFunding}
+            className="flex-1 rounded-lg bg-amber-700 px-4 py-2.5 text-sm font-medium text-white hover:bg-amber-800"
+          >
+            I&apos;ve funded — retry
+          </button>
+        </div>
+        <p className="mt-3 text-[11px] text-amber-700">
+          {isTestnet ? "Fund with 0.05 testnet BNB, wait ~10s for confirmation, then retry. No real funds needed." : "Fund with ~0.01 BNB mainnet, or set NEXT_PUBLIC_ALTANA_CHAIN=testnet and use the free faucet for demo."}
+        </p>
+        <button
+          onClick={() => {
+            setPhase("form");
+            setError(null);
+            setFundingAddress(null);
+            setMode(null);
+          }}
+          className="mt-3 text-xs text-amber-800 underline hover:text-amber-900"
+        >
+          ← Back to passkey choices
+        </button>
+        {error && <p className="mt-3 rounded bg-white border border-amber-200 px-3 py-2 text-xs text-amber-800">{error}</p>}
+      </div>
+    );
+  }
 
   return (
     <div className="mt-6 rounded-xl border border-zinc-200 bg-white p-6">
@@ -306,6 +461,11 @@ export function HireConsent({
           </select>
         </label>
       </div>
+      {isTestnet && (
+        <p className="mt-3 text-xs text-sky-600">
+          Demo mode: {chainId === 97 ? "BSC Testnet" : "BSC Mainnet"} — {isTestnet ? "testnet BNB is free from the faucet, no real funds needed." : "mainnet needs real BNB."}
+        </p>
+      )}
 
       <div className="mt-6">
         <h3 className="text-sm font-medium text-zinc-800">Choose a passkey action</h3>
@@ -315,18 +475,18 @@ export function HireConsent({
         <div className="mt-4 grid grid-cols-1 sm:grid-cols-2 gap-3">
           <button
             onClick={() => grantWithMode("recover")}
-            disabled={isPrompting}
+            disabled={isBusy}
             className="rounded-lg bg-zinc-900 px-4 py-3 text-sm font-medium text-white hover:bg-zinc-700 disabled:opacity-60 flex flex-col items-center gap-1"
           >
-            <span>{isPrompting && mode === "recover" ? "Check your device…" : "Use existing passkey"}</span>
+            <span>{phase === "prompting" && mode === "recover" ? "Check your device…" : phase === "checking" ? "Checking balance…" : "Use existing passkey"}</span>
             <span className="text-[11px] font-normal text-zinc-300">Face ID / Touch ID picker</span>
           </button>
           <button
             onClick={() => grantWithMode("create")}
-            disabled={isPrompting}
+            disabled={isBusy}
             className="rounded-lg border border-zinc-300 bg-white px-4 py-3 text-sm font-medium text-zinc-800 hover:bg-zinc-50 disabled:opacity-60 flex flex-col items-center gap-1"
           >
-            <span>{isPrompting && mode === "create" ? "Check your device…" : "Create new wallet"}</span>
+            <span>{phase === "prompting" && mode === "create" ? "Check your device…" : phase === "checking" ? "Checking balance…" : "Create new wallet"}</span>
             <span className="text-[11px] font-normal text-zinc-500">One-time setup</span>
           </button>
         </div>
@@ -339,7 +499,7 @@ export function HireConsent({
       {error && (
         <div className="mt-4 rounded-md bg-amber-50 border border-amber-200 px-3 py-3">
           <p className="text-xs font-medium text-amber-900">Passkey didn&apos;t complete</p>
-          <p className="mt-1 text-xs text-amber-800">{error}</p>
+          <p className="mt-1 text-xs text-amber-800 whitespace-pre-wrap break-words">{error}</p>
           <button
             onClick={() => {
               setError(null);
