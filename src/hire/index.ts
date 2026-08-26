@@ -6,7 +6,7 @@ import type { Category } from "../registry/model";
 import { validateCalldata, simulateCall } from "./validate-calldata";
 import { store } from "../db";
 import { decryptSecret } from "../lib/secrets";
-import { Executor, sessionFromPersisted } from "../runtime/executor";
+import { Executor, sessionFromPersisted, sdkPermissionsOf } from "../runtime/executor";
 import type { MandateRecord } from "../db/store";
 import { logger } from "../lib/logger";
 import { toBaseUnits } from "../lib/money";
@@ -98,7 +98,7 @@ export async function hireAgent(
   const session = sessionFromPersisted(
     sessionKey,
     mandate.sessionPublicKey,
-    permissions as any,
+    sdkPermissionsOf(permissions),
     mandate.expirySeconds,
     mandate.walletAddress as `0x${string}`,
   );

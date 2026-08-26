@@ -1,4 +1,4 @@
-import { createCipheriv, createDecipheriv, randomBytes, createHash } from "node:crypto";
+import { createCipheriv, createDecipheriv, randomBytes, createHash, timingSafeEqual } from "node:crypto";
 
 /**
  * Encrypt session signers at rest (AES-256-GCM). The key derives from
@@ -34,3 +34,34 @@ export function decryptSecret(payload: string): string {
     decipher.final(),
   ]).toString("utf8");
 }
+
+/**
+ * Mandate RUN TOKENS — the autonomy credential.
+ *
+ * After hiring, the user can let their own runner (cron job, CLI loop, LLM
+ * operator) call Vigil's execute API unattended. The credential is a random
+ * 256-bit bearer token shown ONCE at grant time; we keep only its SHA-256.
+ * It authorizes calls that are still bounded by everything else: the agent's
+ * calldata validation, the spend caps in the onchain session, and revocation.
+ * Losing the token is recoverable — revoke the mandate and hire again.
+ */
+
+/** Generate a fresh run token (returned to the user exactly once). */
+export function newRunToken(): string {
+  return randomBytes(32).toString("hex");
+}
+
+/** SHA-256 of a presented token, hex — what we store, never the token itself. */
+export function hashRunToken(token: string): string {
+  return createHash("sha256").update(token).digest("hex");
+}
+
+/** Constant-time comparison of a presented token against a stored hash. */
+export function verifyRunToken(presented: string | undefined | null, storedHash: string): boolean {
+  if (!presented) return false;
+  const got = Buffer.from(hashRunToken(presented), "hex");
+  const want = Buffer.from(storedHash, "hex");
+  if (got.length !== want.length) return false;
+  return timingSafeEqual(got, want);
+}
+

@@ -5,20 +5,25 @@ import { validateCalldata, simulateCall } from "@/hire/validate-calldata";
 import { selectorsForCategory } from "@/mandate/permissions";
 import type { Category } from "@/registry/model";
 import { store } from "@/db";
-import { decryptSecret } from "@/lib/secrets";
-import { Executor, sessionFromPersisted } from "@/runtime/executor";
-import type { SessionPermissions } from "@altananetwork/sdk";
+import { decryptSecret, verifyRunToken } from "@/lib/secrets";
+import { Executor, sessionFromPersisted, readAuthMeta, sdkPermissionsOf } from "@/runtime/executor";
 import { rateLimit } from "@/lib/rate-limit";
 import { toBaseUnits } from "@/lib/money";
 
 export const dynamic = "force-dynamic";
 
 /**
- * POST /api/hire/execute — call a hired agent's tool, validate its calldata,
+ * POST /api/hire — call a hired agent's tool, validate its calldata,
  * and (if the tool returns calldata) execute under the mandate's session.
  * Read tools just return data; write tools go through the full validation +
  * session execution path. Rate-limited. Supports `dryRun: true` to validate
  * and simulate without submitting.
+ *
+ * Auth: mandates created after run tokens shipped require
+ * `Authorization: Bearer <runToken>` (issued once at grant time). This is what
+ * lets the user's own runner act unattended WITHOUT widening authority: every
+ * call still faces calldata validation, the simulation gate, the spend caps
+ * enforced by the onchain session, and one-click revocation.
  */
 export async function POST(request: NextRequest) {
   // Rate limit per IP.
@@ -45,6 +50,19 @@ export async function POST(request: NextRequest) {
   if (mandate.agentId !== agentId) return Response.json({ error: "mandate does not belong to this agent" }, { status: 403 });
   if (mandate.status !== "active") return Response.json({ error: `mandate is ${mandate.status}` }, { status: 400 });
   if (mandate.expirySeconds * 1000 < Date.now()) return Response.json({ error: "mandate expired" }, { status: 400 });
+
+  // Run-token check for post-token mandates.
+  const auth = readAuthMeta(mandate.permissions);
+  if (auth) {
+    const bearer = request.headers.get("authorization");
+    const token = bearer?.toLowerCase().startsWith("bearer ") ? bearer.slice(7).trim() : undefined;
+    if (!verifyRunToken(token, auth.sha256)) {
+      return Response.json(
+        { error: "unauthorized: missing or invalid run token (Authorization: Bearer <runToken>)" },
+        { status: 401 },
+      );
+    }
+  }
 
   // 1) Call the agent.
   let mcpResult: any;
@@ -114,7 +132,7 @@ export async function POST(request: NextRequest) {
   const session = sessionFromPersisted(
     sessionKey,
     mandate.sessionPublicKey,
-    (mandate.permissions ?? {}) as SessionPermissions,
+    sdkPermissionsOf(mandate.permissions),
     mandate.expirySeconds,
     mandate.walletAddress as `0x${string}`,
   );

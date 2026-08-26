@@ -123,6 +123,12 @@ export const fileStore: Store = {
     else s.agents.push(agent);
     save(s);
   },
+  async deleteAgent(agentId: string) {
+    const s = load();
+    const before = s.agents.length;
+    s.agents = s.agents.filter((a: any) => a.agentId !== agentId);
+    if (s.agents.length !== before) save(s);
+  },
   async listAgents(category?: string) {
     const all = load().agents as any[];
     if (!category) return all;

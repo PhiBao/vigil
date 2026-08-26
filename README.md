@@ -19,7 +19,18 @@ BNB Chain hosts ~250,000 ERC-8004 agents — more than any other network. But yo
 - Registry feedback is sybil-farmed (all BSC feedbacks we sampled came from one address)
 - Semantic search on the canonical API is unreliable (502), and its capability filters are ignored
 
-Vigil fixes the indexing, not the supply: it classifies agents by their exposed tool signatures and verifies their endpoints live. The shelves aren't empty — they're mislabeled. This marketplace makes the label.
+And one problem we measured on Aug 26 2026 that nobody surfaces: **the registry is mostly clones of a few services, not thousands of agents.** We walked all 5,086 MCP-protocol BSC records and probed every distinct endpoint:
+
+| Measured fact | Number |
+|---|---|
+| BSC ERC-8004 agents declaring `protocol=MCP` | **5,086** |
+| Distinct `name+description` publishers among them | **344** |
+| Distinct MCP endpoints behind all 5,086 tokens | **103** |
+| Endpoints answering `tools/list` with real tools that day | **20** |
+| Newest 3,000 rows published by ONE token-per-user factory ("Q402 Agent (by Quack AI)"), all naming the same endpoint | **2,990 / 3,000** |
+| Owner addresses per 1,000 of those rows (owner does NOT identify the spam) | 986 |
+
+The shelves aren't empty — they're mislabeled AND duplicated. Vigil makes the label honest: it classifies by live tool signatures, collapses same-endpoint aliases to one callable service, verifies endpoints continuously, and renders publisher claims it *can't* back as explicitly unverified.
 
 ---
 
@@ -34,7 +45,8 @@ Vigil fixes the indexing, not the supply: it classifies agents by their exposed 
                                          ▼
                      ┌──────────────────────────────────────────────┐
                      │  REGISTRY PIPELINE                           │
-                     │  ingest → classify → verify → persist        │
+                     │  ingest → classify → verify → reclassify     │
+                     │  → dedupe-by-endpoint → persist              │
                      │  (background worker, rate-limited)           │
                      └───────────────────┬──────────────────────────┘
                                          │
@@ -56,6 +68,8 @@ Vigil fixes the indexing, not the supply: it classifies agents by their exposed 
 2. **Scan** — paste any BSC wallet. We read Venus, Aave V3, PancakeSwap V3, and idle stablecoin positions and return dollar-quantified findings. Each finding is matched to real registry agents that fix it. Read-only, no connection, no signup.
 
 3. **Hire** — approve with a passkey (Face ID / Touch ID). We create an Altana smart-account wallet on your device, grant a scoped session (contract allowlist + daily spend cap + expiry), register the key in the onchain Keystore, and route requests to the third-party agent's MCP endpoint. **The agent proposes actions; your session decides.** Every calldata it returns is validated (target allowlist, selector check, approval checks, live simulation) before submission, and the onchain session is the final backstop.
+
+4. **Let it run by itself** — right after hiring you get a one-time **run token** and a copy-paste curl block. Hand both to any runner — cron, a CLI loop, or an AI operator — and it can invoke the hired agent unattended via `POST /api/hire`. The token authenticates but does not authorize: each call faces the same validation + simulation + onchain caps, and revoking the mandate ends it instantly.
 
 ---
 
@@ -147,7 +161,7 @@ pnpm dev                     # http://localhost:3000
 | `DATABASE_URL` | Postgres URL. If unset, a file store at `data/vigil.json` is used (dev/demo). |
 | `MANDATE_ENCRYPTION_KEY` | AES-256-GCM key for encrypting agent session keys at rest. **Set in production** (a dev key is used with a warning otherwise). |
 | `AGENT_RUN_KEY` | Protects the `?op=verify` and `confirm=1` endpoints. |
-| `RATE_LIMIT_PER_MIN` | Raises the external-API throttle (default 8/min, the anonymous 8004scan tier). |
+| `RATE_LIMIT_PER_MIN` | Overrides the 8004scan per-minute budget (default 180, measured from response headers; day budget 20k also enforced). |
 | `LOG_LEVEL` | pino level. |
 
 ---
@@ -160,22 +174,26 @@ Each agent row is built from the 8004scan registry **plus our own verification**
 
 - `agentId` (`chain:registry:token`), name, description, owner, wallet
 - `categories` + `categoryReasons` — **why** each category was assigned (the exact tool signatures that fired)
+- `claimedOnly` — description-advertised categories with no tool evidence behind them
+- `endpointKey` / `duplicateOf` / `aliases` — endpoint clustering: one canonical record per MCP service; same-endpoint token clones are aliases, never shown as separate agents
 - `protocols`, `x402`, service endpoints (MCP / A2A / web)
 - Verification state: `verifiedAt`, `healthStatus`, `uptimeChecks`/`uptimeOk`, verified tool list
 
-### Classifier (deterministic, auditable)
+### Classifier (deterministic, auditable, evidence-only)
 
-Category assignment comes from **tool signatures**, token-aware to avoid substring collisions:
+Category assignment comes from **tool signatures only** — a description can never earn a category on its own. Rules are regression-tested against real captured tool lists (`pnpm test`):
 
-| Category | Example triggers |
+| Category | Example evidence |
 |---|---|
-| `health_factor` | `getAccountLiquidity`, `repayBorrow`, `borrow`, `healthfactor`, `liquidat` |
-| `rebalancing` | `increaseLiquidity`, `decreaseLiquidity`, `rebalance`, `tick`, `recenter` |
-| `yield` | `getSupplyAPR`, `getBorrowAPR`, `mintToken`, `redeem`, `stake`, `harvest` |
-| `grid` | `exactInput`, `swap`, `buy`, `sell`, `limit order`, `grid` |
-| `monitoring` | `getPrice`, `getBalance`, `watch`, `alert`, `pnl` |
+| `health_factor` | `liquidat@liquidations`, `token:repay@repay`, `stresstest@get_stress_test`, `emode@setEModeCategory` |
+| `rebalancing` | `increaseliquidity@increaseLiquidity`, `token:range@topaz_simulate_cl_range`, `rebalance@simulate_rebalance` |
+| `yield` | `supplyapr@getSupplyAPR`, `yieldopportun@get_yield_opportunities`, `token:gauge@…`, `harvest@…` |
+| `grid` | `exactinput@exactInputSingle`, `triggerorder@createTriggerOrder`, `buildswapcalldata@…` — genuine onchain execution only; a fiat agent's generic `create_order` is NOT grid evidence |
+| `monitoring` | `dailydigest@daily_digest`, `token:census@bnb_agent_census`, `scanbottoms@scan_bottoms`, price/balance/portfolio tools |
 
-No LLM. No fallback to "monitoring" for unclassified agents — an agent with no verified tools is honestly unclassified.
+Measured exclusions ship as code: perps margin config ≠ lending health factor; `swapBorrowRateMode` swaps an interest-rate mode, not an asset; `circulating_supply` is tokenomics, not lending supply.
+
+What the description DOES drive: **`claimedOnly`** — capabilities the publisher advertises that no verified tool supports. Those render as an explicit "Publisher claims, unverified" block on the agent page instead of being trusted or discarded. And there is no fallback category: an agent whose tools match nothing stays honestly unclassified.
 
 ### Storage
 
@@ -195,8 +213,9 @@ This product lets a **third-party** propose onchain actions for a user's wallet.
 4. **Onchain backstop** — even if our validator is wrong, loss is bounded by the session permissions.
 5. **Session keys encrypted at rest** — AES-256-GCM with `MANDATE_ENCRYPTION_KEY`.
 6. **Untrusted input discipline** — all registry/agent metadata is schema-validated; agent text is never executed as HTML or injected into context unescaped.
-7. **Rate limiting** — public scan endpoint rate-limited; verification is throttled and never on the user-facing path.
-8. **Resilience** — RPC pool with failover (half the free BSC RPCs are broken — verified); 8004scan semantic search is never a hard dependency.
+7. **Run tokens for autonomy** — a hired agent can be driven unattended by the user's own runner (cron / CLI / LLM operator) using a bearer run token issued once at grant time and stored server-side only as SHA-256. The token authenticates `/api/hire`; it does not widen authority — every call still passes calldata validation, the simulation gate, and the onchain spend caps, and revocation kills it instantly.
+8. **Rate limiting** — public scan endpoint rate-limited; verification is throttled and never on the user-facing path.
+9. **Resilience** — RPC pool with failover (half the free BSC RPCs are broken — verified); 8004scan semantic search is never a hard dependency.
 
 ---
 
@@ -207,7 +226,14 @@ This product lets a **third-party** propose onchain actions for a user's wallet.
 pnpm tsx scripts/roundtrip-testnet.mts
 
 # Build the registry index + report per-category supply
+# (score-ordered paging + endpoint dedupe; see notes below)
 pnpm tsx scripts/ingest-registry.mts [maxPages]
+
+# Seed verified multi-vendor supply (prunes stale rows first)
+pnpm seed
+
+# Classifier regression tests (real captured tool lists)
+pnpm test
 
 # Background worker: ingest + verify continuously
 pnpm tsx scripts/verify-worker.mts --interval=300
@@ -227,6 +253,22 @@ pnpm tsx scripts/agent-advantage.mts [--json]
 # Scan a batch of addresses
 pnpm tsx scripts/test-scan.mts [address ...]
 ```
+
+### Ingest reality check (measured Aug 26 2026)
+
+- **Paging is score-ordered** (`sortBy=total_score&order=desc`). Default token-id order puts one
+  token-per-user publisher on every page; score order puts real agents on page 1.
+- **Detail fetches are economized** — the first 3 occurrences of an identical agent name are probed;
+  if they all name the same endpoint, later same-name rows are recorded as inferred aliases. On a
+  measured 400-row pass this turned 219 fetches into 3 and left zero inferred rows canonical.
+- **Same endpoint ⇒ same service.** 5,086 BSC MCP tokens collapse to ~100 services. The marketplace
+  renders canonical records only.
+- **Throttle follows headers**, not folklore: the anonymous 8004scan tier reports
+  `x-ratelimit-limit-minute: 180` and `x-ratelimit-limit-day: 20000`. (An earlier version assumed
+  10/min and starved its own index by 22x.) `throttle.observe()` re-tunes from live responses.
+- **Verification reclassifies.** Most publishers declare empty tool lists in the registry; the live
+  `tools/list` probe is often the first real evidence, so `verifyAgent` re-runs the classifier on
+  verified tools.
 
 ### Testnet funding
 
@@ -284,16 +326,21 @@ Three partner tracks run alongside the main challenge and are judged independent
 
 Nothing in the build or the sub-tracks requires waiting — the work is executable now, in parallel. The one background process (verification accrual) runs continuously and is not a blocker.
 
-- [x] Registry pipeline: ingest → classify → verify → persist (107 indexed, 17 verified live — HeyAnon family fully covered)
-- [x] Marketplace surface: browse (equal depth ×4), agent detail (auditable reasons), scan on-ramp, hire consent
+- [x] Registry pipeline: ingest (score-ordered) → classify → verify (**reclassifies from live tools**) → **endpoint-dedupe** → persist
+- [x] Honest supply accounting: full census done (see table above); store holds canonical services only, with vendor diversity — 17 seeded endpoints across 10 distinct owners, every category ≥2 services
+- [x] Marketplace surface: browse (equal depth ×4), agent detail (auditable reasons + "publisher claims, unverified" block), scan on-ramp, hire consent
 - [x] Altana session rail: grant / execute / enforce / revoke (proven onchain on testnet: `0xa2212cb9…` + `UnauthorizedCall` rejection)
 - [x] Calldata validation + simulation for third-party proposals
 - [x] Storage (Postgres + file fallback), rate limiting, encrypted keys, RPC failover
 - [x] In-product live hire action: tool picker → MCP call → validate → session execution → receipt (read tools: no funds needed; write tools: validated + simulated)
+- [x] **Autonomy rail**: run token issued at grant (SHA-256 at rest), bearer-authenticated `/api/hire`, copy-paste runner panel on the hire page — user's cron/LLM operator can act unattended inside the same caps, revocation kills instantly
+- [x] Classifier regression tests: `pnpm test` (11 cases from real captured tool lists; every past mislabel is a pinned case)
+- [x] Throttle obeys measured API limits (180/min, 20k/day) and re-tunes from response headers
 - [x] TermiX Agent Advantage Report: 3 tasks via verified agents (Venus, V3 Pools, Beefy) — `data/agent-advantage.md`
 - [x] Altana track: testnet session proven; mainnet is optional for the "stronger" score
 - [x] PancakeSwap demo: V3 Pools (LP range) + Token Swaps (bounded swap) via the hire rail, allowlisted to PancakeSwap contracts
-- [ ] 8004scan Pro key application → speed up verification (free for participants; anonymous tier is 8/min)
+- [ ] Re-run `pnpm seed` against the production Postgres (Neon) so the deployed catalog matches this repo's verified state
+- [ ] 8004scan Pro key application → verification cadence headroom (anonymous tier already measured generous: 180/min)
 - [ ] Judging-window hardening + judge demo path (polish empty/loading/error states for thin categories)
 
 **Judging window:** Sep 9 – 23. Winner announced Nov 5. The marketplace must stay live and cheap through then. File store is ephemeral on serverless — set `DATABASE_URL` for persistent mandates in production.

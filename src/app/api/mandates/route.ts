@@ -1,7 +1,7 @@
 import { NextRequest } from "next/server";
 import { randomUUID } from "node:crypto";
 import { store } from "../../../db";
-import { encryptSecret } from "../../../lib/secrets";
+import { encryptSecret, newRunToken, hashRunToken } from "../../../lib/secrets";
 import { rateLimit } from "../../../lib/rate-limit";
 import type { Category } from "../../../registry/model";
 import { toBaseUnits } from "../../../lib/money";
@@ -93,6 +93,14 @@ export async function POST(request: NextRequest) {
 
   try {
     const id = randomUUID();
+    // Run token: issued once, shown to the user now. We persist only its
+    // SHA-256 — inside the permissions JSON so both the file store and the
+    // Postgres jsonb column carry it with no schema change.
+    const runToken = newRunToken();
+    const persistedPermissions = {
+      ...(body.permissions ?? {}),
+      __auth: { kind: "run-token" as const, sha256: hashRunToken(runToken) },
+    };
     await store().createMandate({
       id,
       walletAddress,
@@ -102,11 +110,11 @@ export async function POST(request: NextRequest) {
       expirySeconds,
       sessionPublicKey,
       sessionSignerEncrypted: encryptSecret(sessionSigner),
-      permissions: body.permissions,
+      permissions: persistedPermissions,
       status: "active",
       createdAt: new Date(),
     });
-    return Response.json({ ok: true, id });
+    return Response.json({ ok: true, id, runToken });
   } catch (e: any) {
     console.error("mandate create error", e);
     return Response.json({ error: "store unavailable", detail: String(e?.message ?? e) }, { status: 500 });

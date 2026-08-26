@@ -138,6 +138,9 @@ function buildPgStore(sql: postgres.Sql): Store {
         on conflict (agent_id) do update set data = excluded.data, updated_at = now()
       `;
     },
+    async deleteAgent(agentId: string) {
+      await sql`delete from agents where agent_id = ${agentId}`;
+    },
     async listAgents(category?: string) {
       if (category) {
         const r = await sql`select data from agents where data->'categories' ? ${category} order by updated_at desc`;

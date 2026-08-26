@@ -1,5 +1,6 @@
 import type { AgentRecord } from "./model";
 import { listTools } from "./mcp";
+import { classify } from "./classify";
 import { logger } from "../lib/logger";
 
 /**
@@ -8,11 +9,27 @@ import { logger } from "../lib/logger";
  * capability surface. Results are cached and updated on a slow cadence —
  * endpoints rate-limit aggressively (verified), so verification must never run
  * on the user-facing path.
+ *
+ * Classification is REDONE here whenever we get fresh tool evidence: most
+ * publishers declare an empty tool list in the registry, so ingest-time
+ * classification sees nothing. The live probe is often the first real evidence
+ * — treating verification as read-only would leave exactly those agents
+ * unclassified forever.
  */
 
 /** Single in-process cache with a TTL; refreshed by the background worker. */
 const cache = new Map<string, { tools: string[]; at: string; ok: boolean; error?: string }>();
 const TTL_MS = 6 * 60 * 60 * 1000; // 6h (background worker refreshes)
+
+/** Classify from live tool evidence, keeping the description as claim-checking material. */
+function reclassify(rec: AgentRecord): void {
+  const tools = rec.services.mcp?.verified ?? [];
+  if (!tools.length) return;
+  const { categories, reasons, claimedOnly } = classify(tools, rec.description ?? "");
+  rec.categories = categories;
+  rec.categoryReasons = reasons as Record<string, string[]>;
+  rec.claimedOnly = claimedOnly;
+}
 
 /** Verify (or read cached) an agent's MCP endpoint. Mutates the record. */
 export async function verifyAgent(rec: AgentRecord): Promise<AgentRecord> {
@@ -27,7 +44,10 @@ export async function verifyAgent(rec: AgentRecord): Promise<AgentRecord> {
     rec.verifiedAt = hit.at;
     rec.healthStatus = hit.ok ? "healthy" : "unreachable";
     rec.uptimeChecks += 1;
-    if (hit.ok) rec.uptimeOk += 1;
+    if (hit.ok) {
+      rec.uptimeOk += 1;
+      reclassify(rec);
+    }
     return rec;
   }
   try {
@@ -38,7 +58,8 @@ export async function verifyAgent(rec: AgentRecord): Promise<AgentRecord> {
     rec.healthStatus = "healthy";
     rec.uptimeChecks += 1;
     rec.uptimeOk += 1;
-    logger.info({ agent: rec.name, tools: tools.length }, "verified agent");
+    reclassify(rec);
+    logger.info({ agent: rec.name, tools: tools.length, cats: rec.categories }, "verified agent");
   } catch (e: any) {
     cache.set(ep, { tools: [], at: new Date().toISOString(), ok: false, error: String(e?.message ?? e) });
     rec.healthStatus = "unreachable";

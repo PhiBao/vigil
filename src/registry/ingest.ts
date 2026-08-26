@@ -21,29 +21,57 @@ interface ListAgent {
   name?: string;
   description?: string;
   owner_address?: string;
+  owner_publisher_tier?: string;
   supported_protocols?: string[];
   x402_supported?: boolean;
   total_score?: number;
   total_feedbacks?: number;
+  average_score?: number;
+  health_score?: number;
+  star_count?: number;
+  is_verified?: boolean;
   created_at?: string;
 }
 
-/** Fetch one page of MCP-capable BSC agents. */
+/**
+ * Fetch one page of MCP-capable BSC agents, highest registry score first.
+ *
+ * The sort order is load-bearing, not cosmetic. There are 5,086 MCP agents on
+ * BSC and the default (token-id) order is dominated by a single publisher that
+ * mints one token per user: 2,990 of the newest 3,000 rows are named "Q402
+ * Agent (by Quack AI)" and all 2,990 declare the SAME endpoint. A bounded walk
+ * in default order therefore spends every detail fetch on one callable
+ * service. Ordering by score puts real agents on page 1.
+ */
 export async function fetchMcpPage(page: number): Promise<ListAgent[]> {
-  const url = `${BASE}/agents?chainId=56&protocol=MCP&limit=${PAGE}&page=${page}`;
+  const url =
+    `${BASE}/agents?chainId=56&protocol=MCP&limit=${PAGE}&page=${page}` +
+    `&sortBy=total_score&order=desc`;
   await throttle("8004scan").take();
-  const res = await fetch(url, { signal: AbortSignal.timeout(20_000) });
-  if (!res.ok) throw new Error(`8004scan ${res.status}`);
-  const body = (await res.json()) as { data?: ListAgent[] };
+  const body = await getJson<{ data?: ListAgent[] }>(url);
   return body.data ?? [];
+}
+
+/** GET with bounded retry — the registry API intermittently stalls past 20s. */
+async function getJson<T>(url: string, attempts = 3): Promise<T> {
+  let lastErr: unknown;
+  for (let i = 0; i < attempts; i++) {
+    try {
+      const res = await fetch(url, { signal: AbortSignal.timeout(20_000) });
+      if (!res.ok) throw new Error(`8004scan ${res.status}`);
+      return (await res.json()) as T;
+    } catch (e) {
+      lastErr = e;
+      if (i < attempts - 1) await new Promise((r) => setTimeout(r, 800 * (i + 1)));
+    }
+  }
+  throw lastErr;
 }
 
 /** Fetch the full detail record for one agent (has services/endpoints). */
 export async function fetchAgentDetail(chainId: number, tokenId: number): Promise<any> {
   await throttle("8004scan").take();
-  const res = await fetch(`${BASE}/agents/${chainId}/${tokenId}`, { signal: AbortSignal.timeout(20_000) });
-  if (!res.ok) throw new Error(`8004scan detail ${res.status}`);
-  const body = (await res.json()) as { data?: any };
+  const body = await getJson<{ data?: any }>(`${BASE}/agents/${chainId}/${tokenId}`);
   return body.data ?? null;
 }
 
@@ -58,7 +86,7 @@ export function toRecord(list: ListAgent, detail: any | null): AgentRecord {
   }
 
   const toolNames = [...(mcp?.tools ?? [])];
-  const { categories, reasons } = classify(toolNames, list.description ?? "");
+  const { categories, reasons, claimedOnly } = classify(toolNames, list.description ?? "");
 
   const owner = (list.owner_address ?? detail?.owner_address) as Address | undefined;
   const wallet = (detail?.agent_wallet ?? detail?.owner_address ?? owner) as Address | undefined;
@@ -73,6 +101,7 @@ export function toRecord(list: ListAgent, detail: any | null): AgentRecord {
     wallet: wallet && isAddress(wallet) ? wallet : ("0x0000000000000000000000000000000000000000" as Address),
     categories,
     categoryReasons: reasons,
+    claimedOnly,
     protocols,
     x402: Boolean(list.x402_supported),
     services: {
@@ -86,7 +115,75 @@ export function toRecord(list: ListAgent, detail: any | null): AgentRecord {
     registryScore: list.total_score ?? 0,
     registryFeedbacks: list.total_feedbacks ?? 0,
     createdAt: list.created_at,
+    endpointKey: mcp ? endpointKey(mcp.endpoint) : undefined,
   };
+}
+
+/**
+ * Normalize an MCP endpoint so that trivially different URLs for the same
+ * service collapse: case, default ports, trailing slashes, and the `/mcp`
+ * vs `/mcp/` vs `/sse` suffix all describe one server.
+ */
+export function endpointKey(raw: string): string {
+  try {
+    const u = new URL(raw);
+    const host = u.hostname.toLowerCase().replace(/^www\./, "");
+    const port = u.port && u.port !== (u.protocol === "https:" ? "443" : "80") ? `:${u.port}` : "";
+    const path = u.pathname.replace(/\/+$/, "").replace(/\/(mcp|sse|messages)$/i, "");
+    return `${host}${port}${path}`;
+  } catch {
+    return raw.trim().toLowerCase().replace(/\/+$/, "");
+  }
+}
+
+/**
+ * Elect one canonical record per MCP endpoint and mark the others as aliases.
+ * Preference order: verified tools present, then more declared tools, then
+ * higher registry score, then more feedbacks, then oldest (the original
+ * publisher), then lowest token id as a deterministic tiebreak.
+ */
+export function dedupeByEndpoint(records: AgentRecord[]): AgentRecord[] {
+  const groups = new Map<string, AgentRecord[]>();
+  const out: AgentRecord[] = [];
+
+  for (const r of records) {
+    if (!r.endpointKey) {
+      out.push(r);
+      continue;
+    }
+    const g = groups.get(r.endpointKey);
+    if (g) g.push(r);
+    else groups.set(r.endpointKey, [r]);
+  }
+
+  const rank = (a: AgentRecord) => [
+    // A fetched record always beats one whose endpoint we only inferred, so a
+    // canonical row is never built from unverified data.
+    a.endpointInferred ? 0 : 1,
+    a.services.mcp?.verified?.length ? 1 : 0,
+    a.services.mcp?.tools.length ?? 0,
+    a.registryScore,
+    a.registryFeedbacks,
+    -new Date(a.createdAt ?? "2999-01-01").getTime(),
+    -a.tokenId,
+  ];
+
+  for (const [key, group] of groups) {
+    const sorted = [...group].sort((a, b) => {
+      const ra = rank(a);
+      const rb = rank(b);
+      for (let i = 0; i < ra.length; i++) if (ra[i] !== rb[i]) return rb[i] - ra[i];
+      return 0;
+    });
+    const [canonical, ...dupes] = sorted;
+    out.push({
+      ...canonical,
+      endpointKey: key,
+      aliases: dupes.map((d) => d.agentId),
+    });
+    for (const d of dupes) out.push({ ...d, endpointKey: key, duplicateOf: canonical.agentId });
+  }
+  return out;
 }
 
 /** Index one agent by chain/token id (for the vertical slice + spot checks). */
@@ -109,9 +206,35 @@ export async function indexAgent(chainId: number, tokenId: number): Promise<Agen
   return toRecord(list, detail);
 }
 
-/** Page through all MCP agents (best effort, bounded). */
+/**
+ * Page through MCP agents in score order, deduped by endpoint.
+ *
+ * Detail fetches are the expensive step (one HTTP call per token), and the
+ * registry is dominated by publishers that mint one token per user pointing at
+ * a single shared endpoint. To avoid spending the entire budget on them we
+ * probe the first `PROBE_LIMIT` occurrences of each agent name; if those all
+ * resolve to the same endpoint, later rows with that name are recorded as
+ * inferred aliases without a fetch. Measured: 300 score-ordered rows contain
+ * 219 copies of one name, so this turns 219 fetches into 3.
+ *
+ * The inference is deliberately conservative — it only ever kicks in from the
+ * 4th duplicate of a name onward, and only when the probes are unanimous, so a
+ * name reused by genuinely different services is always fetched properly.
+ */
+const PROBE_LIMIT = 3;
+
 export async function ingestMcpAgents(maxPages = 100): Promise<AgentRecord[]> {
   const records: AgentRecord[] = [];
+  /** name -> endpoints seen in probes (unanimous single entry => inferable). */
+  const probes = new Map<string, { seen: Set<string>; n: number }>();
+  let inferred = 0;
+
+  const inferableEndpoint = (name: string): string | undefined => {
+    const p = probes.get(name);
+    if (!p || p.n < PROBE_LIMIT || p.seen.size !== 1) return undefined;
+    return [...p.seen][0];
+  };
+
   for (let page = 1; page <= maxPages; page++) {
     let rows: ListAgent[];
     try {
@@ -121,15 +244,44 @@ export async function ingestMcpAgents(maxPages = 100): Promise<AgentRecord[]> {
       break;
     }
     if (rows.length === 0) break;
-    // Batch detail fetches with concurrency 6.
-    for (let i = 0; i < rows.length; i += 6) {
-      const slice = rows.slice(i, i + 6);
+
+    // Split each page: rows we can infer cost nothing, the rest get fetched.
+    const toFetch: ListAgent[] = [];
+    for (const r of rows) {
+      const endpoint = inferableEndpoint(r.name ?? "");
+      if (endpoint) {
+        const rec = toRecord(r, { services: { mcp: { endpoint } } });
+        records.push({ ...rec, endpointInferred: true });
+        inferred++;
+      } else {
+        toFetch.push(r);
+      }
+    }
+
+    for (let i = 0; i < toFetch.length; i += 6) {
+      const slice = toFetch.slice(i, i + 6);
       const details = await Promise.all(
         slice.map((r) => fetchAgentDetail(r.chain_id ?? 56, r.token_id ?? 0).catch(() => null)),
       );
-      slice.forEach((r, j) => records.push(toRecord(r, details[j])));
+      slice.forEach((r, j) => {
+        const rec = toRecord(r, details[j]);
+        records.push(rec);
+        const name = r.name ?? "";
+        const p = probes.get(name) ?? { seen: new Set<string>(), n: 0 };
+        p.n++;
+        if (rec.endpointKey) p.seen.add(rec.services.mcp!.endpoint);
+        else p.seen.add("<none>");
+        probes.set(name, p);
+      });
     }
-    logger.info({ page, count: records.length }, "ingested page");
+    logger.info({ page, count: records.length, inferred }, "ingested page");
   }
-  return records;
+
+  const deduped = dedupeByEndpoint(records);
+  const canonical = deduped.filter((r) => !r.duplicateOf).length;
+  logger.info(
+    { total: deduped.length, canonical, inferred, fetchesSaved: inferred },
+    "ingest complete (endpoint-deduped)",
+  );
+  return deduped;
 }

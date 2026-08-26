@@ -66,20 +66,42 @@ export default async function AgentDetailPage({
         {/* Classification evidence */}
         <section className="mt-8">
           <h2 className="text-sm font-semibold uppercase tracking-wide text-zinc-400">Why it&apos;s in these categories</h2>
-          <div className="mt-3 grid grid-cols-1 gap-3">
-            {Object.entries(agent.categoryReasons ?? {})
-              .filter(([, reasons]) => (reasons as string[]).length > 0)
-              .map(([cat, reasons]) => (
-                <div key={cat} className="rounded-lg border border-zinc-200 bg-white p-4">
-                  <div className="text-sm font-medium capitalize">{cat.replace(/_/g, " ")}</div>
-                  <div className="mt-2 flex flex-wrap gap-1.5">
-                    {(reasons as string[]).map((r) => (
-                      <span key={r} className="rounded bg-zinc-100 px-2 py-1 font-mono text-[11px] text-zinc-600">{r}</span>
-                    ))}
+          {Object.entries(agent.categoryReasons ?? {}).some(([, reasons]) => (reasons as string[]).length > 0) ? (
+            <div className="mt-3 grid grid-cols-1 gap-3">
+              {Object.entries(agent.categoryReasons ?? {})
+                .filter(([, reasons]) => (reasons as string[]).length > 0)
+                .map(([cat, reasons]) => (
+                  <div key={cat} className="rounded-lg border border-zinc-200 bg-white p-4">
+                    <div className="text-sm font-medium capitalize">{cat.replace(/_/g, " ")}</div>
+                    <div className="mt-2 flex flex-wrap gap-1.5">
+                      {(reasons as string[]).map((r) => (
+                        <span key={r} className={`rounded px-2 py-1 font-mono text-[11px] ${r.startsWith("desc:") ? "bg-amber-50 border border-amber-200 text-amber-700" : "bg-zinc-100 text-zinc-600"}`}>{r}</span>
+                      ))}
+                    </div>
                   </div>
-                </div>
-              ))}
-          </div>
+                ))}
+            </div>
+          ) : (
+            <p className="mt-2 text-xs text-zinc-500">
+              No category yet — none of its verified tools match a capability rule. Vigil does not
+              guess from marketing copy.
+            </p>
+          )}
+
+          {(agent.claimedOnly ?? []).length > 0 && (
+            <div className="mt-3 rounded-lg border border-amber-200 bg-amber-50 p-4">
+              <div className="text-sm font-medium text-amber-900">Publisher claims, unverified</div>
+              <p className="mt-1 text-xs text-amber-800">
+                The description advertises these capabilities, but no verified tool signature
+                supports them. Shown here rather than silently trusted.
+              </p>
+              <div className="mt-2 flex flex-wrap gap-1.5">
+                {agent.claimedOnly.map((c) => (
+                  <span key={c} className="rounded bg-white border border-amber-300 px-2 py-1 text-[11px] capitalize text-amber-800">{c.replace(/_/g, " ")}</span>
+                ))}
+              </div>
+            </div>
+          )}
         </section>
 
         {/* Verified capability */}

@@ -38,6 +38,7 @@ export function HireConsent({
   const [fundingAddress, setFundingAddress] = useState<string | null>(null);
   const [pendingWallet, setPendingWallet] = useState<{ wallet: any; signer: any; chainId: number } | null>(null);
   const [mandateId, setMandateId] = useState<string | null>(null);
+  const [runToken, setRunToken] = useState<string | null>(null);
   const [tools, setTools] = useState<ToolDef[]>([]);
   const [selectedTool, setSelectedTool] = useState<string>("");
   const [argsJson, setArgsJson] = useState("{}");
@@ -51,6 +52,30 @@ export function HireConsent({
   const explorerUrl = (addr: string) =>
     isTestnet ? `https://testnet.bscscan.com/address/${addr}` : `https://bscscan.com/address/${addr}`;
 
+  async function fetchTools(id: string) {
+    try {
+      const res = await fetch(`/api/agent/${encodeURIComponent(id)}/tools`);
+      const data = await res.json();
+      const list: ToolDef[] = data.tools ?? [];
+      setTools(list);
+      if (list.length > 0) {
+        setSelectedTool(list[0].name);
+        const t = list[0];
+        const props = t.inputSchema?.properties ?? {};
+        const required = t.inputSchema?.required ?? Object.keys(props);
+        const sample: Record<string, any> = {};
+        for (const k of required) {
+          if (k === "userAddress" || k === "wallet") sample[k] = walletAddress ?? "0x0000000000000000000000000000000000000000";
+          else if (k === "chainName") sample[k] = "bsc";
+          else if (k === "pool") sample[k] = "CORE";
+          else if (k === "tokenSymbol" || k === "tokenSymbols") sample[k] = k === "tokenSymbols" ? ["USDT"] : "USDT";
+          else sample[k] = "";
+        }
+        setArgsJson(JSON.stringify(sample, null, 2));
+      }
+    } catch {}
+  }
+
   // Restore last hire for this agent after reload / back navigation
   const storageKey = `vigil:hire:${agentId}`;
 
@@ -60,7 +85,8 @@ export function HireConsent({
       try {
         const raw = localStorage.getItem(storageKey);
         if (!raw) return;
-        const saved = JSON.parse(raw) as { walletAddress: string; mandateId: string; capUsd: number; expirySeconds: number };
+        const saved = JSON.parse(raw) as { walletAddress: string; mandateId: string; capUsd: number; expirySeconds: number; runToken?: string };
+        if (saved.runToken) setRunToken(saved.runToken);
         if (!saved.walletAddress || !saved.mandateId) return;
         const res = await fetch(`/api/mandates?wallet=${saved.walletAddress}`);
         if (!res.ok) return;
@@ -87,7 +113,7 @@ export function HireConsent({
 
   async function persistHire(walletAddr: string, mId: string) {
     try {
-      localStorage.setItem(storageKey, JSON.stringify({ walletAddress: walletAddr, mandateId: mId, capUsd, expirySeconds, agentId }));
+      localStorage.setItem(storageKey, JSON.stringify({ walletAddress: walletAddr, mandateId: mId, capUsd, expirySeconds, agentId, runToken }));
     } catch {}
   }
 
@@ -163,6 +189,7 @@ export function HireConsent({
         throw new Error(body?.error ?? "failed to save mandate — session was granted onchain, revoke via Altana if needed");
       }
       const data = await res.json();
+      if (data.runToken) setRunToken(data.runToken as string);
       setWalletAddress(wallet.address);
       setMandateId(data.id);
       setPhase("done");
@@ -271,30 +298,6 @@ export function HireConsent({
     }
   }
 
-  async function fetchTools(id: string) {
-    try {
-      const res = await fetch(`/api/agent/${encodeURIComponent(id)}/tools`);
-      const data = await res.json();
-      const list: ToolDef[] = data.tools ?? [];
-      setTools(list);
-      if (list.length > 0) {
-        setSelectedTool(list[0].name);
-        const t = list[0];
-        const props = t.inputSchema?.properties ?? {};
-        const required = t.inputSchema?.required ?? Object.keys(props);
-        const sample: Record<string, any> = {};
-        for (const k of required) {
-          if (k === "userAddress" || k === "wallet") sample[k] = walletAddress ?? "0x0000000000000000000000000000000000000000";
-          else if (k === "chainName") sample[k] = "bsc";
-          else if (k === "pool") sample[k] = "CORE";
-          else if (k === "tokenSymbol" || k === "tokenSymbols") sample[k] = k === "tokenSymbols" ? ["USDT"] : "USDT";
-          else sample[k] = "";
-        }
-        setArgsJson(JSON.stringify(sample, null, 2));
-      }
-    } catch {}
-  }
-
   async function executeTool(dryRun: boolean) {
     if (!mandateId || !selectedTool) return;
     setExecPhase("running");
@@ -308,7 +311,10 @@ export function HireConsent({
       }
       const res = await fetch("/api/hire", {
         method: "POST",
-        headers: { "Content-Type": "application/json" },
+        headers: {
+          "Content-Type": "application/json",
+          ...(runToken ? { Authorization: `Bearer ${runToken}` } : {}),
+        },
         body: JSON.stringify({ agentId, mandateId, tool: selectedTool, args, dryRun }),
       });
       const data = await res.json();
@@ -415,6 +421,8 @@ export function HireConsent({
             </>
           )}
         </div>
+
+        <AutonomyPanel agentId={agentId} mandateId={mandateId} runToken={runToken} capUsd={capUsd} />
       </div>
     );
   }
@@ -556,6 +564,114 @@ export function HireConsent({
       {phase === "error" && !error && (
         <p className="mt-3 rounded-md bg-red-50 border border-red-200 px-3 py-2 text-xs text-red-700">Something went wrong. Please try again.</p>
       )}
+    </div>
+  );
+}
+
+/**
+ * Post-hire autonomy. The user's own runner (cron, CLI loop, LLM operator)
+ * calls Vigil with the run token to act unattended — inside the same mandate:
+ * calldata validation, the simulation gate, the onchain spend caps, and
+ * one-click revocation all still apply to every call. The token is shown once
+ * here and kept only as a hash server-side.
+ */
+function AutonomyPanel({
+  agentId,
+  mandateId,
+  runToken,
+  capUsd,
+}: {
+  agentId: string;
+  mandateId: string;
+  runToken: string | null;
+  capUsd: number;
+}) {
+  const [origin, setOrigin] = useState("");
+  const [revealed, setRevealed] = useState(false);
+  const [copied, setCopied] = useState<string | null>(null);
+
+  useEffect(() => {
+    setOrigin(window.location.origin);
+    // Legacy mandates granted before run tokens existed have none; everything
+    // else in this panel needs one, so default to revealed-less copy state.
+  }, []);
+
+  if (!runToken) return null;
+
+  const curl = `curl -X POST ${origin}/api/hire \\
+  -H "Authorization: Bearer ${runToken}" \\
+  -H "Content-Type: application/json" \\
+  -d '{
+    "agentId": "${agentId}",
+    "mandateId": "${mandateId}",
+    "tool": "<tool-name>",
+    "args": { },
+    "dryRun": true
+  }'`;
+
+  const cron = `# every hour, unattended — the caps below are enforced onchain either way
+0 * * * * ${curl.replace(/\n/g, "\n      ")}`;
+
+  const masked = `${runToken.slice(0, 8)}${"•".repeat(24)}${runToken.slice(-6)}`;
+
+  async function copy(label: string, text: string) {
+    try {
+      await navigator.clipboard.writeText(text);
+      setCopied(label);
+      setTimeout(() => setCopied(null), 1600);
+    } catch {}
+  }
+
+  return (
+    <div className="rounded-xl border border-sky-200 bg-white p-6">
+      <h3 className="text-sm font-semibold">Let it run by itself</h3>
+      <p className="mt-1 text-xs text-zinc-500">
+        Hand this token to your own runner — a cron job, a CLI loop, or an AI operator like Claude or
+        GPT. It can then call this hired agent on your behalf, unattended. Authority does not get
+        wider: every call passes calldata validation, a live simulation, and the{" "}
+        <span className="font-medium text-zinc-700">${capUsd}/day</span> cap enforced by your onchain
+        session — and revoking the mandate kills it instantly.
+      </p>
+
+      <div className="mt-4 rounded-lg border border-zinc-200 bg-zinc-50 p-3 flex items-center gap-2">
+        <span className="text-[11px] uppercase tracking-wide text-zinc-400 shrink-0">Run token</span>
+        <code className="flex-1 truncate font-mono text-xs text-zinc-800">{revealed ? runToken : masked}</code>
+        <button onClick={() => setRevealed((v) => !v)} className="shrink-0 rounded border border-zinc-200 bg-white px-2 py-1 text-xs hover:bg-zinc-100">
+          {revealed ? "Hide" : "Reveal"}
+        </button>
+        <button onClick={() => copy("token", runToken)} className="shrink-0 rounded border border-zinc-200 bg-white px-2 py-1 text-xs hover:bg-zinc-100">
+          {copied === "token" ? "Copied!" : "Copy"}
+        </button>
+      </div>
+
+      <div className="mt-4 relative">
+        <pre className="overflow-auto rounded-lg bg-zinc-900 p-4 pr-20 text-[11px] leading-relaxed text-zinc-100">{curl}</pre>
+        <button
+          onClick={() => copy("curl", curl)}
+          className="absolute right-2 top-2 rounded border border-zinc-600 px-2 py-1 text-[11px] text-zinc-300 hover:bg-zinc-800"
+        >
+          {copied === "curl" ? "Copied!" : "Copy"}
+        </button>
+      </div>
+
+      <p className="mt-3 text-xs text-zinc-500">
+        Start with <code className="font-mono text-[11px]">dryRun: true</code> — it validates and simulates without
+        submitting. Set it to <code className="font-mono text-[11px]">false</code> when you trust the tool.
+        The tool list + JSON schemas for your runner are machine-readable at{" "}
+        <a className="text-sky-600 hover:underline break-all" href={`/api/agent/${encodeURIComponent(agentId)}/tools`}>
+          /api/agent/{agentId}/tools
+        </a>.
+      </p>
+
+      <details className="mt-3">
+        <summary className="cursor-pointer text-xs font-medium text-sky-700">Show hourly-cron example</summary>
+        <pre className="mt-2 overflow-auto rounded-lg bg-zinc-50 p-3 text-[10px] leading-relaxed text-zinc-700">{cron}</pre>
+      </details>
+
+      <p className="mt-3 text-[11px] text-zinc-400">
+        Treat the token like a password: Vigil stores only its hash and shows it once. If you lose it,
+        revoke the mandate and hire again — it takes one biometric prompt.
+      </p>
     </div>
   );
 }

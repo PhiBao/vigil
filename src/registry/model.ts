@@ -35,6 +35,11 @@ export interface AgentRecord {
   categories: Category[];
   /** Reason each category was assigned (auditable). */
   categoryReasons: Record<string, string[]>;
+  /**
+   * Categories the publisher's description advertises but the tool signature
+   * does not support. Shown as an unverified claim, never as a capability.
+   */
+  claimedOnly: Category[];
   protocols: string[];
   x402: boolean;
   services: {
@@ -52,6 +57,30 @@ export interface AgentRecord {
   registryScore: number;
   registryFeedbacks: number;
   createdAt?: string;
+  /**
+   * Endpoint clustering. Many distinct token IDs resolve to the SAME MCP
+   * endpoint, so they are one callable service. This is the dominant feature
+   * of the registry, not an edge case: BSC has 5,086 MCP agents, and 2,990 of
+   * the newest 3,000 are one publisher minting a token per user, all declaring
+   * the identical endpoint. Owner address does NOT identify these (986
+   * distinct owners per 1,000 rows) — only the endpoint does.
+   *
+   * We elect one canonical record per endpoint and mark the rest as aliases.
+   * Without this the marketplace shows one server thousands of times under
+   * thousands of names.
+   */
+  endpointKey?: string;
+  /** agentId of the canonical record, when this row is a duplicate. */
+  duplicateOf?: string;
+  /** agentIds sharing this endpoint, when this row is canonical. */
+  aliases?: string[];
+  /**
+   * True when the endpoint was inferred from sibling rows with an identical
+   * name rather than fetched. Only set on mass-minted duplicates, which always
+   * lose the canonical election, so an inferred row is never shown as a
+   * callable service.
+   */
+  endpointInferred?: boolean;
 }
 
 export const isHireable = (a: AgentRecord): boolean =>

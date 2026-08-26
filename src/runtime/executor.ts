@@ -1,5 +1,32 @@
 import { createClient, BNB, signerFromPrivateKey, type Session, type Call } from "@altananetwork/sdk";
+import type { SessionPermissions } from "@altananetwork/sdk";
 import { logger } from "../lib/logger";
+
+/**
+ * Auth metadata attached to every NEW mandate's persisted permissions JSON
+ * (`permissions.__auth`, stored inside the same jsonb/file blob so both store
+ * implementations carry it with no schema change). Legacy mandates predate run
+ * tokens: no `__auth`, and /api/hire treats them as before.
+ */
+export interface RunAuthMeta {
+  kind: string;
+  sha256: string;
+}
+
+export function readAuthMeta(raw: unknown): RunAuthMeta | null {
+  const meta = (raw as { __auth?: RunAuthMeta } | null)?.__auth;
+  return meta && typeof meta.sha256 === "string" ? meta : null;
+}
+
+/**
+ * Strip non-SDK metadata from persisted permissions before reconstructing a
+ * Session. The Altana SDK expects exactly { calls, spend } — leaking __auth
+ * into it would be undefined behavior.
+ */
+export function sdkPermissionsOf(raw: unknown): Pick<SessionPermissions, "calls" | "spend"> {
+  const p = (raw ?? {}) as Partial<SessionPermissions>;
+  return { calls: p.calls, spend: p.spend };
+}
 
 /**
  * Server-side executor. Runs actions through an Altana SESSION key (the

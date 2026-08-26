@@ -55,6 +55,7 @@ export interface Store {
   updateRun(id: string, patch: Partial<RunRecord>): Promise<void>;
   listRuns(agentId?: string): Promise<RunRecord[]>;
   upsertAgent(agent: unknown): Promise<void>;
+  deleteAgent(agentId: string): Promise<void>;
   listAgents(category?: string): Promise<unknown[]>;
   getAgent(agentId: string): Promise<unknown | null>;
   countAgents(): Promise<number>;

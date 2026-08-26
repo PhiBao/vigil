@@ -1,52 +1,181 @@
 import type { Category } from "./model";
 
 /**
- * Deterministic capability classifier. Assigns categories from the TOOL
- * SIGNATURE (not name/description, which are self-declared). Token-aware to
- * avoid substring collisions: "limit" must not match "limitations".
- * Auditable — each assignment carries the rule that fired.
+ * Deterministic capability classifier.
+ *
+ * CORE RULE: a category is assigned ONLY when it is backed by at least one
+ * TOOL-SIGNATURE hit. The description is self-declared marketing copy and can
+ * never, on its own, earn a category. It is still parsed — but only to produce
+ * `claimedOnly`, the set of categories the publisher advertises that the tool
+ * signature does NOT support. That gap is the mislabeling this marketplace
+ * exists to expose, so we surface it instead of silently trusting it.
+ *
+ * Tuned against the live BSC corpus (measured, not assumed): 103 distinct MCP
+ * endpoints, 20 reachable, whose real `tools/list` output drove the rules
+ * below. Notable false positives that shaped them:
+ *   - a fiat payment agent exposing `create_order`/`confirm_order` was landing
+ *     in `grid`. Generic business nouns ("order", "position", "buy") are NOT
+ *     evidence of onchain market execution; "swap"/"exactInput" are.
+ *   - a contract-audit agent was landing in `yield` purely from the word
+ *     "reward" in its description.
+ *   - an attestation/proof agent was landing in `grid` and `health_factor`.
  */
 
 interface Rule {
   category: Category;
-  /** Substrings matched against the FULL normalized tool name (≥5 chars to reduce noise). */
+  /**
+   * Substrings matched against the tool name with separators stripped.
+   * Use for multi-word signatures that are unambiguous when joined
+   * (e.g. "exactinput", "getaccountliquidity").
+   */
   full: string[];
-  /** Exact token matches (camelCase/snake/space split). */
+  /** Exact token matches (camelCase / snake_case / space split). */
   tokens: string[];
-  /** Only applied to descriptions (weakest signal), require ≥6 chars. */
-  description: string[];
+  /**
+   * Flattened substrings that VETO this tool for this category, even if a
+   * token matched. Each entry below is a measured false positive from the live
+   * corpus, kept as a regression guard.
+   */
+  exclude?: string[];
+  /**
+   * Description-only signals. These NEVER assign a category; they only mark a
+   * publisher claim, which we compare against the tool evidence.
+   */
+  claims: string[];
 }
 
 const RULES: Rule[] = [
   {
     category: "health_factor",
-    full: ["getaccountliquidity", "repayborrow", "healthfactor", "getborrow", "liquidat"],
-    tokens: ["borrow", "repay", "collateral", "loan", "debt", "liquidate"],
-    description: ["liquidation", "health factor", "liquidat"],
+    full: [
+      "getaccountliquidity",
+      "accountliquidity",
+      "healthfactor",
+      "repayborrow",
+      "getborrow",
+      "borrowbalance",
+      "liquidat",
+      "stresstest",
+      "getrisk",
+      "riskscore",
+      "collateral",
+      "emode",
+    ],
+    tokens: ["borrow", "repay", "collateral", "loan", "debt", "liquidate", "risk", "ltv"],
+    // A perps venue's `changeMarginType` / `setLeverage` is margin *config*, a
+    // different risk primitive from a lending health factor. Routing a Venus
+    // borrower's liquidation-protection mandate to a perps DEX would be unsafe,
+    // so bare "margin"/"leverage" is deliberately not health_factor evidence.
+    exclude: ["margintype", "marginsettings", "positionmargin"],
+    claims: ["liquidation", "health factor", "liquidat", "undercollateral", "margin call"],
   },
   {
     category: "rebalancing",
-    full: ["increaseliquidity", "decreaseliquidity", "rebalance", "recenter", "autocompound", "rebalanceposition"],
-    tokens: ["rebalance", "tick", "recenter", "compound"],
-    description: ["rebalanc", "out of range", "concentrated liquidity"],
+    full: [
+      "increaseliquidity",
+      "decreaseliquidity",
+      "rebalance",
+      "recenter",
+      "autocompound",
+      "compoundfees",
+      "collectfees",
+      "createposition",
+      "estimateranges",
+      "recommendlp",
+    ],
+    tokens: ["rebalance", "recenter", "compound", "tick", "range", "reposition"],
+    claims: ["rebalanc", "out of range", "concentrated liquidity", "recenter"],
   },
   {
     category: "yield",
-    full: ["getsupplyapr", "getborrowapr", "supplyapr", "stakerate", "apy"],
-    tokens: ["minttoken", "redeem", "harvest", "stake", "unstake", "yield", "apy", "reward", "vault"],
-    description: ["yield", "apr", "apy", "earn", "reward"],
+    full: [
+      "supplyapr",
+      "borrowapr",
+      "getsupplyapy",
+      "stakerate",
+      "yieldopportun",
+      "getopportunities",
+      "harvest",
+      "claimrewards",
+      "getvault",
+      "depositclm",
+      "scanprotocols",
+    ],
+    tokens: ["apr", "apy", "yield", "harvest", "stake", "unstake", "restake", "reward", "rewards", "vault", "vaults", "supply", "redeem", "minttoken", "gauge", "bribe"],
+    // "supply" means lending-supply in `supply()`, but token economics in
+    // `circulating_supply` / `total_supply`. The latter is a price metric.
+    exclude: ["circulatingsupply", "totalsupply", "maxsupply", "supplyof"],
+    claims: ["yield", "apr", "apy", "auto-compound", "farm", "earn"],
   },
   {
     category: "grid",
-    full: ["exactinput", "exactoutput", "gridtrade", "limitorder"],
-    tokens: ["swap", "buy", "sell", "trade", "grid", "spot", "order", "position"],
-    description: ["grid trading", "trading", "buy", "sell", "swap"],
+    // Onchain market execution only. A generic "order"/"position"/"buy" is not
+    // evidence — those appear in payment, betting, and CRM agents alike.
+    full: [
+      "exactinput",
+      "exactoutput",
+      "gridtrade",
+      "limitorder",
+      "triggerorder",
+      "trailingstop",
+      "stoplosstakeprofit",
+      "buildswapcalldata",
+      "quoteswap",
+      "swapexact",
+      "closeposition",
+      "setleverage",
+    ],
+    tokens: ["swap", "swapevm", "grid", "leverage", "long", "short", "perp", "perps"],
+    // Aave's `swapBorrowRateMode` swaps an interest-rate mode, not an asset.
+    exclude: ["borrowratemode", "swaprate"],
+    claims: ["grid trading", "grid bot", "dca", "limit order", "take profit", "stop loss"],
   },
   {
     category: "monitoring",
-    full: ["getprice", "getbalance", "watchwallet", "getmarkets", "alert"],
-    tokens: ["watch", "monitor", "track", "alert", "portfolio", "pnl", "price"],
-    description: ["monitor", "watch", "alert", "track"],
+    full: [
+      "getprice",
+      "getbalance",
+      "multichainbalance",
+      "watchwallet",
+      "getmarkets",
+      "getportfolio",
+      "getperformance",
+      "getpositions",
+      "getstatus",
+      "getmetrics",
+      "getstats",
+      "freshness",
+      "dailydigest",
+      "webhookregister",
+      "scanbottoms",
+      "scantops",
+      "evaluatesymbol",
+      "poolscan",
+      "getpoolstats",
+      "getprotocolstats",
+    ],
+    tokens: [
+      "watch",
+      "monitor",
+      "track",
+      "alert",
+      "alerts",
+      "portfolio",
+      "pnl",
+      "price",
+      "prices",
+      "balance",
+      "balances",
+      "status",
+      "stats",
+      "metrics",
+      "scan",
+      "digest",
+      "signal",
+      "signals",
+      "census",
+    ],
+    claims: ["monitor", "watch 24", "alert", "track", "notif", "dashboard"],
   },
 ];
 
@@ -56,50 +185,64 @@ function tokensOf(name: string): string[] {
   return camel.toLowerCase().replace(/[^a-z0-9 ]/g, " ").split(/\s+/).filter(Boolean);
 }
 
-export function classify(
-  tools: string[],
-  description: string,
-): { categories: Category[]; reasons: Record<Category, string[]> } {
-  const reasons: Record<Category, string[]> = { health_factor: [], rebalancing: [], yield: [], grid: [], monitoring: [] };
-  const hits = new Set<Category>();
+const flatten = (name: string) => name.toLowerCase().replace(/[^a-z0-9]/g, "");
+
+const emptyReasons = (): Record<Category, string[]> => ({
+  health_factor: [],
+  rebalancing: [],
+  yield: [],
+  grid: [],
+  monitoring: [],
+});
+
+export interface Classification {
+  /** Assigned categories — every one backed by tool-signature evidence. */
+  categories: Category[];
+  /** Auditable evidence per category. `desc:` entries are claims, not proof. */
+  reasons: Record<Category, string[]>;
+  /**
+   * Categories the description advertises but the tool signature does not
+   * support. Rendered as "publisher claim, unverified" — never as capability.
+   */
+  claimedOnly: Category[];
+}
+
+export function classify(tools: string[], description: string): Classification {
+  const reasons = emptyReasons();
+  const fromTools = new Set<Category>();
+  const fromDesc = new Set<Category>();
 
   const descNorm = (description ?? "").toLowerCase();
+  const prepared = tools.map((t) => ({ raw: t, flat: flatten(t), toks: tokensOf(t) }));
+
   for (const rule of RULES) {
-    // 1. Full tool-name substring (strong).
-    for (const t of tools) {
-      const norm = t.toLowerCase().replace(/[^a-z0-9]/g, "");
+    for (const t of prepared) {
+      if (rule.exclude?.some((x) => t.flat.includes(x))) continue;
       for (const sig of rule.full) {
-        if (norm.includes(sig)) {
-          reasons[rule.category].push(`${sig}@${t}`);
-          hits.add(rule.category);
+        if (t.flat.includes(sig)) {
+          reasons[rule.category].push(`${sig}@${t.raw}`);
+          fromTools.add(rule.category);
         }
       }
-    }
-    // 2. Exact token match (strong).
-    for (const t of tools) {
-      const toks = tokensOf(t);
       for (const sig of rule.tokens) {
-        if (toks.includes(sig)) {
-          reasons[rule.category].push(`token:${sig}@${t}`);
-          hits.add(rule.category);
+        if (t.toks.includes(sig)) {
+          reasons[rule.category].push(`token:${sig}@${t.raw}`);
+          fromTools.add(rule.category);
         }
       }
     }
-    // 3. Description only (weak) — only if not already hit by tools.
-    if (!hits.has(rule.category)) {
-      for (const sig of rule.description) {
-        if (descNorm.includes(sig)) {
-          reasons[rule.category].push(`desc:${sig}`);
-          hits.add(rule.category);
-        }
+    for (const sig of rule.claims) {
+      if (descNorm.includes(sig)) {
+        reasons[rule.category].push(`desc:${sig}`);
+        fromDesc.add(rule.category);
       }
     }
   }
 
-  const categories = [...hits];
-  // Do NOT fall back to "monitoring": an agent with no verified tools is
-  // unclassified, not a monitor. Classification quality comes from live
-  // verification; declaring a category without evidence is exactly the
-  // mislabeling problem this marketplace exists to fix.
-  return { categories, reasons };
+  // Tool evidence is the only thing that assigns a category. An agent with no
+  // reachable tools is UNCLASSIFIED, not a monitor — declaring a capability
+  // without evidence is exactly the failure this marketplace exists to fix.
+  const categories = [...fromTools];
+  const claimedOnly = [...fromDesc].filter((c) => !fromTools.has(c));
+  return { categories, reasons, claimedOnly };
 }
