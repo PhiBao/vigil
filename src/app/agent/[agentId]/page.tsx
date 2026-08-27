@@ -1,5 +1,6 @@
 import Link from "next/link";
 import { getAgent } from "@/registry/queries";
+import { TryPanel } from "@/components/try-panel";
 
 export const metadata = {
   title: "Agent — Vigil",
@@ -123,6 +124,13 @@ export default async function AgentDetailPage({
             </p>
           )}
         </section>
+
+        {/* Try it live — zero-dead-end preview for verified agents */}
+        {verifiedTools.length > 0 && (
+          <section className="mt-8">
+            <TryPanel agentId={agentId} />
+          </section>
+        )}
 
         {/* Status */}
         <section className="mt-8 rounded-xl border border-zinc-200 bg-white p-5 grid grid-cols-2 gap-4 text-sm">

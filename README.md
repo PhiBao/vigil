@@ -285,6 +285,22 @@ pnpm tsx scripts/roundtrip-testnet.mts
 
 ---
 
+## For judges (2-minute path)
+
+Every step below works without a wallet, without gas:
+
+1. **Land** → try the sample diagnosis card or scan any address.
+2. **Browse a category** → open any verified agent → **Try it live**: run one of its real tools right on the page through our validated proxy (`POST /api/try`, rate-limited, output capped, never executed).
+3. **Audit the label**: agent pages show the exact tool signatures that placed each category, publisher claims left unsupported by evidence, and verification freshness.
+4. **Hire for real actions** (needs a passkey + gas): scoped Altana session → Keystore registration → receipts at `/watch/<wallet>` → one-click revoke. Post-hire you get a run token + copy-paste curl so your own runner can act unattended within the same caps.
+
+Key artifacts in this repo:
+- Supply census and method — table above; `scripts/seed-verified.mts` reproduces the catalog.
+- TermiX Agent Advantage Report with captured outputs — `data/agent-advantage.md`.
+- Classifier regression suite from real tool lists — `pnpm test`.
+
+---
+
 ## How to test the product
 
 1. **Browse**: visit `/browse` — five categories, each showing indexed agents with evidence.

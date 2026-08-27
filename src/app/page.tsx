@@ -21,6 +21,7 @@ export default async function Home() {
           <span className="font-semibold tracking-tight text-lg">Vigil</span>
           <nav className="flex items-center gap-5 text-sm text-zinc-600">
             <Link href="/browse" className="hover:text-zinc-900">Browse agents</Link>
+            <Link href="/publish" className="hover:text-zinc-900">Publish</Link>
             <span className="text-xs text-zinc-400">{total} indexed</span>
           </nav>
         </div>
@@ -48,6 +49,31 @@ export default async function Home() {
           <p className="mt-3 text-xs text-zinc-400">
             Works with any public address. Read-only — no connection, no signup.
           </p>
+        </div>
+
+        {/* The one-minute path: every step works without a wallet. */}
+        <div className="mt-8 grid grid-cols-1 sm:grid-cols-3 gap-3 max-w-3xl mx-auto text-sm">
+          <Link
+            href="/browse"
+            className="rounded-xl border border-sky-200 bg-sky-50/60 px-4 py-3 hover:border-sky-300"
+          >
+            <div className="font-medium text-sky-900">Try agents live</div>
+            <p className="mt-1 text-xs text-sky-800/80">Run a verified agent&apos;s tools right here — no wallet, no gas.</p>
+          </Link>
+          <Link
+            href="/scan/0x28C6c06298d514Db089934071355E5743bf21d60"
+            className="rounded-xl border border-zinc-200 bg-white px-4 py-3 hover:border-zinc-300"
+          >
+            <div className="font-medium">See a sample diagnosis</div>
+            <p className="mt-1 text-xs text-zinc-500">A real wallet, dollar-quantified findings, matched agents.</p>
+          </Link>
+          <Link
+            href="/publish"
+            className="rounded-xl border border-zinc-200 bg-white px-4 py-3 hover:border-zinc-300"
+          >
+            <div className="font-medium">Publish your agent</div>
+            <p className="mt-1 text-xs text-zinc-500">Built with Agent Studio? Get listed and verified in minutes.</p>
+          </Link>
         </div>
 
         <div className="mt-12">
